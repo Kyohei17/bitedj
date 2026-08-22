@@ -66,11 +66,13 @@ class FsHistoryStore {
     /// Append `trackLocation` (an absolute path on that drive) to `sessionName`,
     /// creating the session on first use. `durationSeconds` is stored alongside
     /// so a session can be labelled with its running time without resolving
-    /// every track against a library.
+    /// every track against a library. When `pSession` is non-null, it receives
+    /// the session totals after the append without opening the database again.
     static bool appendTrack(const QString& mountRoot,
             const QString& sessionName,
             const QString& trackLocation,
-            int durationSeconds);
+            int durationSeconds,
+            FsHistorySession* pSession = nullptr);
 
     /// Delete one session from the drive.
     static bool deleteSession(const QString& mountRoot, const QString& sessionName);

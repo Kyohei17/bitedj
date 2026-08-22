@@ -6,6 +6,7 @@
 #include <QMessageBox>
 #include <QSqlTableModel>
 
+#include "library/dao/fshistorywriter.h"
 #include "library/dao/fshistorystore.h"
 #include "library/library.h"
 #include "library/library_prefs.h"
@@ -103,8 +104,32 @@ SetlogFeature::SetlogFeature(
                   /*keep hidden tracks*/ true),
           m_currentPlaylistId(kInvalidPlaylistId),
           m_driveViewPlaylistId(kInvalidPlaylistId),
+          m_pHistoryWriter(new FsHistoryWriter()),
           m_pLibrary(pLibrary),
           m_pConfig(pConfig) {
+    m_historyWriterThread.setObjectName(QStringLiteral("FsHistoryWriter"));
+    m_pHistoryWriter->moveToThread(&m_historyWriterThread);
+    connect(&m_historyWriterThread,
+            &QThread::finished,
+            m_pHistoryWriter,
+            &QObject::deleteLater);
+    connect(this,
+            &SetlogFeature::appendDriveTrackRequested,
+            m_pHistoryWriter,
+            &FsHistoryWriter::appendTrack,
+            Qt::QueuedConnection);
+    connect(this,
+            &SetlogFeature::forgetHistoryMountRequested,
+            m_pHistoryWriter,
+            &FsHistoryWriter::forgetMount,
+            Qt::QueuedConnection);
+    connect(m_pHistoryWriter,
+            &FsHistoryWriter::trackAppended,
+            this,
+            &SetlogFeature::slotDriveTrackAppended,
+            Qt::QueuedConnection);
+    m_historyWriterThread.start();
+
     // remove unneeded entries
     deleteAllUnlockedPlaylistsWithFewerTracks();
 
@@ -209,11 +234,37 @@ SetlogFeature::SetlogFeature(
 }
 
 SetlogFeature::~SetlogFeature() {
+    if (m_historyWriterThread.isRunning()) {
+        // This blocking call is only made during orderly application shutdown.
+        // It is queued behind all append requests, so no accepted history entry
+        // is abandoned just because BiteDJ is closing.
+        drainHistoryWriter();
+        m_historyWriterThread.quit();
+        m_historyWriterThread.wait();
+        m_pHistoryWriter = nullptr;
+    }
+
     // Clean up history when shutting down in case the track threshold changed,
     // incl. potentially empty current playlist
     deleteAllUnlockedPlaylistsWithFewerTracks();
     // Delete the placeholder
     m_playlistDao.deletePlaylist(m_driveViewPlaylistId);
+}
+
+void SetlogFeature::drainHistoryWriter() {
+    if (m_historyWriterThread.isRunning()) {
+        QMetaObject::invokeMethod(
+                m_pHistoryWriter, "drain", Qt::BlockingQueuedConnection);
+    }
+}
+
+void SetlogFeature::forgetHistoryMountBlocking(const QString& mountRoot) {
+    if (m_historyWriterThread.isRunning()) {
+        QMetaObject::invokeMethod(m_pHistoryWriter,
+                "forgetMount",
+                Qt::BlockingQueuedConnection,
+                Q_ARG(QString, mountRoot));
+    }
 }
 
 QVariant SetlogFeature::title() {
@@ -267,11 +318,19 @@ void SetlogFeature::slotDeletePlaylist() {
         if (btn != QMessageBox::Yes) {
             return;
         }
+        const bool deletingCurrent =
+                m_currentSessionByMount.value(mountRoot) == sessionName;
+        if (deletingCurrent) {
+            // Delayed completions from the session being deleted must not make
+            // it current again after the database row is removed.
+            ++m_sessionGenerationByMount[mountRoot];
+            m_currentSessionByMount.remove(mountRoot);
+            forgetHistoryMountBlocking(mountRoot);
+        } else {
+            drainHistoryWriter();
+        }
         if (!FsHistoryStore::deleteSession(mountRoot, sessionName)) {
             return;
-        }
-        if (m_currentSessionByMount.value(mountRoot) == sessionName) {
-            m_currentSessionByMount.remove(mountRoot);
         }
         if (m_shownMountRoot == mountRoot && m_shownSessionName == sessionName) {
             showDriveSession(mountRoot, QString(), QModelIndex());
@@ -523,43 +582,40 @@ QString SetlogFeature::mountRootForLocation(const QString& trackLocation) const 
     return QString();
 }
 
-QString SetlogFeature::currentSessionOnDrive(const QString& mountRoot) {
-    const auto it = m_currentSessionByMount.constFind(mountRoot);
-    if (it != m_currentSessionByMount.constEnd()) {
-        return it.value();
+void SetlogFeature::logTrackToDrive(const QString& mountRoot, const TrackPointer& pTrack) {
+    if (!pTrack) {
+        return;
     }
-    // First track off this drive since it was plugged in: that is where one set
-    // ends and the next begins.
-    const QString sessionName = FsHistoryStore::newSessionName(mountRoot);
-    if (sessionName.isEmpty()) {
-        // Unavailable or write-protected. Nothing to log to, and nothing worth
-        // saying about it on every track change.
-        return QString();
-    }
-    m_currentSessionByMount.insert(mountRoot, sessionName);
-    return sessionName;
+    emit appendDriveTrackRequested(mountRoot,
+            m_sessionGenerationByMount.value(mountRoot),
+            pTrack->getLocation(),
+            static_cast<int>(pTrack->getDuration()),
+            pTrack->getId());
 }
 
-void SetlogFeature::logTrackToDrive(const QString& mountRoot, const TrackPointer& pTrack) {
-    const QString sessionName = currentSessionOnDrive(mountRoot);
-    if (sessionName.isEmpty()) {
+void SetlogFeature::slotDriveTrackAppended(const QString& mountRoot,
+        quint64 sessionGeneration,
+        const QString& sessionName,
+        int trackCount,
+        int durationSeconds,
+        TrackId trackId) {
+    if (!m_usbMountPoints.contains(mountRoot)) {
         return;
     }
-    if (!FsHistoryStore::appendTrack(mountRoot,
-                sessionName,
-                pTrack->getLocation(),
-                static_cast<int>(pTrack->getDuration()))) {
-        return;
+    const bool currentSession =
+            sessionGeneration == m_sessionGenerationByMount.value(mountRoot);
+    if (currentSession) {
+        m_currentSessionByMount.insert(mountRoot, sessionName);
     }
+    updateDriveSessionItem(
+            mountRoot, sessionName, trackCount, durationSeconds, currentSession);
 
-    updateDriveSessionItem(mountRoot, sessionName);
-
-    if (m_shownMountRoot != mountRoot || m_shownSessionName != sessionName) {
+    if (!currentSession || m_shownMountRoot != mountRoot ||
+            m_shownSessionName != sessionName) {
         return;
     }
     // The session on screen just grew. Keep the selection the DJ may be working
     // with (see the same dance in the local branch of slotPlayingTrackChanged).
-    const TrackId trackId = pTrack->getId();
     if (!trackId.isValid()) {
         return;
     }
@@ -576,7 +632,11 @@ void SetlogFeature::logTrackToDrive(const QString& mountRoot, const TrackPointer
 }
 
 void SetlogFeature::updateDriveSessionItem(
-        const QString& mountRoot, const QString& sessionName) {
+        const QString& mountRoot,
+        const QString& sessionName,
+        int trackCount,
+        int durationSeconds,
+        bool currentSession) {
     const QModelIndex volumeIndex = indexOfVolumeNode(mountRoot);
     if (!volumeIndex.isValid()) {
         return;
@@ -586,12 +646,7 @@ void SetlogFeature::updateDriveSessionItem(
         return;
     }
 
-    FsHistorySession session;
-    if (!FsHistoryStore::readSessionSummary(mountRoot, sessionName, &session)) {
-        return;
-    }
-    const QString label = createPlaylistLabel(
-            session.name, session.trackCount, session.durationSeconds);
+    const QString label = createPlaylistLabel(sessionName, trackCount, durationSeconds);
     const QString itemData = sessionNodeData(mountRoot, sessionName);
 
     const QList<TreeItem*> sessionItems = pVolumeItem->children();
@@ -600,6 +655,7 @@ void SetlogFeature::updateDriveSessionItem(
             continue;
         }
         pSessionItem->setLabel(label);
+        pSessionItem->setIcon(currentSession ? QIcon(kCurrentSessionIcon) : QIcon());
         m_pSidebarModel->triggerRepaint();
         return;
     }
@@ -607,7 +663,9 @@ void SetlogFeature::updateDriveSessionItem(
     // The session's first track: give it a row of its own rather than rebuilding
     // the tree, which would collapse whatever the DJ is browsing.
     auto pSessionItem = std::make_unique<TreeItem>(label, itemData);
-    pSessionItem->setIcon(QIcon(kCurrentSessionIcon));
+    if (currentSession) {
+        pSessionItem->setIcon(QIcon(kCurrentSessionIcon));
+    }
     std::vector<std::unique_ptr<TreeItem>> rows;
     rows.push_back(std::move(pSessionItem));
     m_pSidebarModel->insertTreeItemRows(std::move(rows), 0, volumeIndex);
@@ -673,16 +731,16 @@ void SetlogFeature::slotRefreshUsbVolumes() {
     if (mountPoints == m_usbMountPoints) {
         return;
     }
+    const QStringList previousMountPoints = m_usbMountPoints;
     m_usbMountPoints = mountPoints;
 
     // A drive that went away ends its session; plugging it back in starts a new
     // one rather than continuing the set it was pulled out of.
-    for (auto it = m_currentSessionByMount.begin();
-            it != m_currentSessionByMount.end();) {
-        if (mountPoints.contains(it.key())) {
-            ++it;
-        } else {
-            it = m_currentSessionByMount.erase(it);
+    for (const QString& previousMountPoint : previousMountPoints) {
+        if (!mountPoints.contains(previousMountPoint)) {
+            ++m_sessionGenerationByMount[previousMountPoint];
+            emit forgetHistoryMountRequested(previousMountPoint);
+            m_currentSessionByMount.remove(previousMountPoint);
         }
     }
     if (!m_shownMountRoot.isEmpty() && !mountPoints.contains(m_shownMountRoot)) {
@@ -704,6 +762,8 @@ void SetlogFeature::forgetShownDriveSession() {
 
 void SetlogFeature::slotMountEjected(const QString& mountPoint) {
     const QString cleaned = QDir::cleanPath(mountPoint);
+    ++m_sessionGenerationByMount[cleaned];
+    emit forgetHistoryMountRequested(cleaned);
     m_currentSessionByMount.remove(cleaned);
     if (m_shownMountRoot == cleaned) {
         forgetShownDriveSession();
@@ -722,9 +782,9 @@ void SetlogFeature::slotStartNewDriveSession() {
     if (!pItem || !parseVolumeNodeData(pItem->getData(), &mountRoot)) {
         return;
     }
-    // Forgetting the drive's session is all it takes: the next track played off
-    // it opens a new one. Nothing is written to the stick until then, so a set
-    // that never happens leaves no empty session behind.
+    // Bumping the generation makes the worker pick a new unique session name on
+    // the next append. Nothing is written until that append succeeds.
+    ++m_sessionGenerationByMount[mountRoot];
     if (m_currentSessionByMount.remove(mountRoot) > 0) {
         constructChildModel(kInvalidPlaylistId);
     }
@@ -754,10 +814,14 @@ void SetlogFeature::slotDeleteDriveHistory() {
         return;
     }
 
+    // Invalidate pending completions first, then let accepted writes finish and
+    // forget their cached session before deleting the database synchronously.
+    ++m_sessionGenerationByMount[mountRoot];
+    m_currentSessionByMount.remove(mountRoot);
+    forgetHistoryMountBlocking(mountRoot);
     if (!FsHistoryStore::clearFilesystemHistory(mountRoot)) {
         return;
     }
-    m_currentSessionByMount.remove(mountRoot);
     if (m_shownMountRoot == mountRoot) {
         showDriveSession(mountRoot, QString(), QModelIndex());
     }

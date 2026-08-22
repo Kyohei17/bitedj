@@ -2,6 +2,7 @@
 
 #include <QHash>
 #include <QPointer>
+#include <QThread>
 #include <QTimer>
 
 #include "library/trackset/baseplaylistfeature.h"
@@ -9,6 +10,7 @@
 
 class Library;
 class QAction;
+class FsHistoryWriter;
 
 /// Bite DJ: the history is USB-centric.
 ///
@@ -58,6 +60,12 @@ class SetlogFeature : public BasePlaylistFeature {
 
   private slots:
     void slotPlayingTrackChanged(TrackPointer currentPlayingTrack);
+    void slotDriveTrackAppended(const QString& mountRoot,
+            quint64 sessionGeneration,
+            const QString& sessionName,
+            int trackCount,
+            int durationSeconds,
+            TrackId trackId);
     void slotPlaylistTableChanged(int playlistId) override;
     void slotPlaylistContentOrLockChanged(const QSet<int>& playlistIds) override;
     void slotPlaylistTableRenamed(int playlistId, const QString& newName) override;
@@ -81,12 +89,13 @@ class SetlogFeature : public BasePlaylistFeature {
     /// Mount root of the drive `trackLocation` lives on, or empty when it is
     /// not on one of the currently mounted removable volumes.
     QString mountRootForLocation(const QString& trackLocation) const;
-    /// The session tracks played off `mountRoot` are being logged to, opening
-    /// one if this is the first track since the drive was mounted. Empty when
-    /// the drive cannot record history (unavailable or write-protected).
-    QString currentSessionOnDrive(const QString& mountRoot);
-    /// Logs a track played off a drive to that drive and updates the sidebar.
+    /// Enqueues a track played off a drive for that drive's history worker.
     void logTrackToDrive(const QString& mountRoot, const TrackPointer& pTrack);
+    /// Waits for already accepted writes. Used only before a user-requested
+    /// destructive store operation and during orderly shutdown.
+    void drainHistoryWriter();
+    /// Drops the worker's cached current session after earlier writes finish.
+    void forgetHistoryMountBlocking(const QString& mountRoot);
 
     /// Shows one drive session in the track view, resolving its stored paths
     /// against the library. `sessionName` may be empty, which shows an empty
@@ -102,7 +111,11 @@ class SetlogFeature : public BasePlaylistFeature {
     void forgetShownDriveSession();
     /// Relabels (or inserts) the sidebar item of one session in place, so
     /// logging a track does not collapse the tree the DJ is browsing.
-    void updateDriveSessionItem(const QString& mountRoot, const QString& sessionName);
+    void updateDriveSessionItem(const QString& mountRoot,
+            const QString& sessionName,
+            int trackCount,
+            int durationSeconds,
+            bool currentSession);
     /// Row of the volume node of `mountRoot`, or an invalid index.
     QModelIndex indexOfVolumeNode(const QString& mountRoot);
     QModelIndex indexOfItemData(const QVariant& data);
@@ -128,6 +141,10 @@ class SetlogFeature : public BasePlaylistFeature {
     QStringList m_usbMountPoints;
     /// Mount root -> the session being logged to on that drive right now.
     QHash<QString, QString> m_currentSessionByMount;
+    /// Incremented whenever a drive starts a new session or disappears. It lets
+    /// the GUI ignore a delayed completion from the preceding session without
+    /// dropping the successfully written history row.
+    QHash<QString, quint64> m_sessionGenerationByMount;
     /// What the scratch playlist currently holds, so a track logged to the
     /// session on screen can be appended to the view as well.
     QString m_shownMountRoot;
@@ -137,6 +154,17 @@ class SetlogFeature : public BasePlaylistFeature {
     /// an eject arrives through Library::mountEjected but a plug-in does not.
     QTimer m_usbPollTimer;
 
+    QThread m_historyWriterThread;
+    FsHistoryWriter* m_pHistoryWriter;
+
     Library* m_pLibrary;
     UserSettingsPointer m_pConfig;
+
+  signals:
+    void appendDriveTrackRequested(const QString& mountRoot,
+            quint64 sessionGeneration,
+            const QString& trackLocation,
+            int durationSeconds,
+            TrackId trackId);
+    void forgetHistoryMountRequested(const QString& mountRoot);
 };

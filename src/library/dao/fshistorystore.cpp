@@ -205,7 +205,8 @@ QString FsHistoryStore::newSessionName(const QString& mountRoot) {
 bool FsHistoryStore::appendTrack(const QString& mountRoot,
         const QString& sessionName,
         const QString& trackLocation,
-        int durationSeconds) {
+        int durationSeconds,
+        FsHistorySession* pSession) {
     if (sessionName.isEmpty()) {
         return false;
     }
@@ -228,14 +229,23 @@ bool FsHistoryStore::appendTrack(const QString& mountRoot,
     }
 
     int position = 1;
+    int trackCount = 0;
+    int totalDurationSeconds = 0;
+    QDateTime startedAt;
     QSqlQuery maxQuery(store.database());
     maxQuery.prepare(QStringLiteral(
-            "SELECT COALESCE(MAX(position), 0) FROM history WHERE session = :session"));
+            "SELECT COALESCE(MAX(position), 0), COUNT(*), "
+            "COALESCE(SUM(duration_seconds), 0), MIN(played_at) "
+            "FROM history WHERE session = :session"));
     maxQuery.bindValue(QStringLiteral(":session"), sessionName);
     if (maxQuery.exec() && maxQuery.next()) {
         position = maxQuery.value(0).toInt() + 1;
+        trackCount = maxQuery.value(1).toInt();
+        totalDurationSeconds = maxQuery.value(2).toInt();
+        startedAt = QDateTime::fromString(maxQuery.value(3).toString(), Qt::ISODate);
     }
 
+    const QDateTime playedAt = QDateTime::currentDateTimeUtc();
     QSqlQuery query(store.database());
     query.prepare(QStringLiteral(
             "INSERT INTO history "
@@ -246,11 +256,17 @@ bool FsHistoryStore::appendTrack(const QString& mountRoot,
     query.bindValue(QStringLiteral(":location"), relPath);
     query.bindValue(QStringLiteral(":duration"), durationSeconds);
     query.bindValue(QStringLiteral(":played_at"),
-            QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+            playedAt.toString(Qt::ISODate));
     if (!query.exec()) {
         qWarning() << kLogTag << ": cannot log" << relPath << "to session"
                    << sessionName << "on" << mountRoot << query.lastError().text();
         return false;
+    }
+    if (pSession) {
+        pSession->name = sessionName;
+        pSession->startedAt = startedAt.isValid() ? startedAt : playedAt;
+        pSession->trackCount = trackCount + 1;
+        pSession->durationSeconds = totalDurationSeconds + durationSeconds;
     }
     return true;
 }

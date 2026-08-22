@@ -1,8 +1,10 @@
 #include "library/dao/fshistorystore.h"
+#include "library/dao/fshistorywriter.h"
 
 #include <gtest/gtest.h>
 
 #include <QFile>
+#include <QSignalSpy>
 #include <QStorageInfo>
 
 #include "test/mixxxtest.h"
@@ -66,10 +68,22 @@ TEST_F(FsHistoryStoreTest, LogsAndReadsBackASession) {
     ASSERT_FALSE(session.isEmpty());
     EXPECT_FALSE(QFile::exists(kDbPath));
 
-    ASSERT_TRUE(FsHistoryStore::appendTrack(
-            kFakeUsb, session, onUsb(QStringLiteral("House/first.mp3")), 300));
-    ASSERT_TRUE(FsHistoryStore::appendTrack(
-            kFakeUsb, session, onUsb(QStringLiteral("House/second.mp3")), 240));
+    FsHistorySession appendedSession;
+    ASSERT_TRUE(FsHistoryStore::appendTrack(kFakeUsb,
+            session,
+            onUsb(QStringLiteral("House/first.mp3")),
+            300,
+            &appendedSession));
+    EXPECT_EQ(session, appendedSession.name);
+    EXPECT_EQ(1, appendedSession.trackCount);
+    EXPECT_EQ(300, appendedSession.durationSeconds);
+    ASSERT_TRUE(FsHistoryStore::appendTrack(kFakeUsb,
+            session,
+            onUsb(QStringLiteral("House/second.mp3")),
+            240,
+            &appendedSession));
+    EXPECT_EQ(2, appendedSession.trackCount);
+    EXPECT_EQ(540, appendedSession.durationSeconds);
     EXPECT_TRUE(QFile::exists(kDbPath));
 
     ASSERT_TRUE(FsHistoryStore::readSessions(kFakeUsb, &sessions));
@@ -84,6 +98,49 @@ TEST_F(FsHistoryStoreTest, LogsAndReadsBackASession) {
     ASSERT_EQ(2, locations.size());
     EXPECT_EQ(onUsb(QStringLiteral("House/first.mp3")), locations.at(0));
     EXPECT_EQ(onUsb(QStringLiteral("House/second.mp3")), locations.at(1));
+}
+
+TEST_F(FsHistoryStoreTest, WriterKeepsSessionsSerialAndReturnsRunningTotals) {
+    if (!haveFakeUsb()) {
+        GTEST_SKIP() << "needs a filesystem mounted at " << qPrintable(kFakeUsb);
+    }
+
+    FsHistoryWriter writer;
+    QSignalSpy appendedSpy(&writer, &FsHistoryWriter::trackAppended);
+
+    writer.appendTrack(kFakeUsb,
+            0,
+            onUsb(QStringLiteral("first.mp3")),
+            120,
+            TrackId(QVariant(1)));
+    ASSERT_EQ(1, appendedSpy.count());
+    QList<QVariant> first = appendedSpy.takeFirst();
+    const QString firstSession = first.at(2).toString();
+    EXPECT_FALSE(firstSession.isEmpty());
+    EXPECT_EQ(1, first.at(3).toInt());
+    EXPECT_EQ(120, first.at(4).toInt());
+
+    writer.appendTrack(kFakeUsb,
+            0,
+            onUsb(QStringLiteral("second.mp3")),
+            180,
+            TrackId(QVariant(2)));
+    ASSERT_EQ(1, appendedSpy.count());
+    QList<QVariant> second = appendedSpy.takeFirst();
+    EXPECT_EQ(firstSession, second.at(2).toString());
+    EXPECT_EQ(2, second.at(3).toInt());
+    EXPECT_EQ(300, second.at(4).toInt());
+
+    writer.appendTrack(kFakeUsb,
+            1,
+            onUsb(QStringLiteral("third.mp3")),
+            240,
+            TrackId(QVariant(3)));
+    ASSERT_EQ(1, appendedSpy.count());
+    QList<QVariant> third = appendedSpy.takeFirst();
+    EXPECT_NE(firstSession, third.at(2).toString());
+    EXPECT_EQ(1, third.at(3).toInt());
+    EXPECT_EQ(240, third.at(4).toInt());
 }
 
 // Paths are stored relative to the mount root, which is what lets a set come

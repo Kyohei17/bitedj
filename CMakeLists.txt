@@ -606,6 +606,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/library/dao/directorydao.cpp
   src/library/dao/fsanalysiscache.cpp
   src/library/dao/fscueoverridestore.cpp
+  src/library/dao/fshistorywriter.cpp
   src/library/dao/fshistorystore.cpp
   src/library/dao/fsmetaoverridestore.cpp
   src/library/dao/fssamplerbankstore.cpp
