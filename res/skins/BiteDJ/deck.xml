@@ -491,8 +491,13 @@
       <WidgetGroup>
         <ObjectName>DeckOverviewContainer</ObjectName>
         <Layout>vertical</Layout>
-        <Size>0me,50f</Size>
+        <Size>0me,68f</Size>
         <Children>
+          <WidgetGroup>
+            <ObjectName>DeckWaveformClip</ObjectName>
+            <Layout>vertical</Layout>
+            <Size>0me,50f</Size>
+            <Children>
           <Overview>
             <ObjectName>DeckOverview</ObjectName>
             <Size>0me,100f</Size>
@@ -664,6 +669,13 @@
               <ConfigKey>[Channel<Variable name="channel"/>],playposition</ConfigKey>
             </Connection>
           </Overview>
+            </Children>
+          </WidgetGroup>
+          <PhraseOverview>
+            <ObjectName>DeckPhraseOverview</ObjectName>
+            <Size>0me,18f</Size>
+            <Channel><Variable name="channel"/></Channel>
+          </PhraseOverview>
         </Children>
       </WidgetGroup>
     </Children>

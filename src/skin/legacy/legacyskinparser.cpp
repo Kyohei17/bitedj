@@ -60,6 +60,7 @@
 #include "widget/wnumberpos.h"
 #include "widget/wnumberrate.h"
 #include "widget/woverview.h"
+#include "widget/wphraseoverview.h"
 #include "widget/wpixmapstore.h"
 #include "widget/wpushbutton.h"
 #include "widget/wraterange.h"
@@ -548,6 +549,8 @@ QList<QWidget*> LegacySkinParser::parseNode(const QDomElement& node) {
         result = wrapWidget(parseStandardWidget<WComboBox>(node));
     } else if (nodeName == "Overview") {
         result = wrapWidget(parseOverview(node));
+    } else if (nodeName == "PhraseOverview") {
+        result = wrapWidget(parsePhraseOverview(node));
     } else if (nodeName == "Visual") {
         result = wrapWidget(parseVisual(node));
     } else if (nodeName == "Text") {
@@ -1003,6 +1006,29 @@ void LegacySkinParser::setupLabelWidget(const QDomElement& element, WLabel* pLab
     pLabel->installEventFilter(
             m_pControllerManager->getControllerLearningEventFilter());
     pLabel->Init();
+}
+
+QWidget* LegacySkinParser::parsePhraseOverview(const QDomElement& node) {
+    const QString group = lookupNodeGroup(node);
+    BaseTrackPlayer* player = m_pPlayerManager->getPlayer(group);
+    if (!player) {
+        SKIN_WARNING(node, *m_pContext, QStringLiteral("No player found for group: %1").arg(group));
+        return nullptr;
+    }
+    auto* widget = new WPhraseOverview(m_pContext->getScaleFactor(), m_pParent);
+    commonWidgetSetup(node, widget);
+    widget->setTrack(player->getLoadedTrack());
+    connect(player,
+            &BaseTrackPlayer::loadingTrack,
+            widget,
+            [widget](TrackPointer, TrackPointer) { widget->setTrack({}); });
+    connect(player,
+            &BaseTrackPlayer::newTrackLoaded,
+            widget,
+            [widget](TrackPointer track) {
+                widget->setTrack(std::move(track));
+            });
+    return widget;
 }
 
 QWidget* LegacySkinParser::parseOverview(const QDomElement& node) {

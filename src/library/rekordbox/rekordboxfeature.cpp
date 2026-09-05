@@ -15,6 +15,8 @@
 #include <QStringList>
 #include <QTextCodec>
 #include <QtDebug>
+#include <fstream>
+#include <limits>
 #include <vector>
 
 #include "engine/engine.h"
@@ -24,6 +26,7 @@
 #include "library/library.h"
 #include "library/queryutil.h"
 #include "library/rekordbox/rekordboxconstants.h"
+#include "library/rekordbox/rekordboxphrases.h"
 #include "library/starrating.h"
 #include "library/trackcollection.h"
 #include "library/trackcollectionmanager.h"
@@ -996,6 +999,64 @@ void setHotCue(TrackPointer track,
 namespace mixxx {
 namespace rekordbox {
 
+QString readPhrases(TrackPointer track, int timingOffset, const QString& anlzPath) {
+    const QString extPath = anlzPath.left(anlzPath.length() - 3) + "EXT";
+    if (!QFileInfo::exists(extPath)) {
+        track->setPhrases({});
+        return {};
+    }
+    try {
+        std::ifstream extFile(extPath.toStdString(), std::ios::binary);
+        kaitai::kstream extStream(&extFile);
+        rekordbox_anlz_t ext(&extStream);
+        const rekordbox_anlz_t::song_structure_tag_t* phrases = nullptr;
+        for (const auto& section : *ext.sections()) {
+            if (section->fourcc() == rekordbox_anlz_t::SECTION_TAGS_SONG_STRUCTURE) {
+                if (phrases) {
+                    throw std::runtime_error("Duplicate phrase analysis");
+                }
+                phrases = static_cast<rekordbox_anlz_t::song_structure_tag_t*>(section->body());
+            }
+        }
+        if (!phrases) {
+            track->setPhrases({});
+            return {};
+        }
+        std::ifstream datFile(anlzPath.toStdString(), std::ios::binary);
+        kaitai::kstream datStream(&datFile);
+        rekordbox_anlz_t dat(&datStream);
+        std::vector<double> times;
+        double finalBoundary = std::numeric_limits<double>::quiet_NaN();
+        for (const auto& section : *dat.sections()) {
+            if (section->fourcc() == rekordbox_anlz_t::SECTION_TAGS_BEAT_GRID) {
+                auto* grid = static_cast<rekordbox_anlz_t::beat_grid_tag_t*>(section->body());
+                for (const auto& beat : *grid->beats()) {
+                    times.push_back(beat->time());
+                    finalBoundary = beat->tempo() > 0
+                            ? beat->time() + 6000000.0 / beat->tempo()
+                            : std::numeric_limits<double>::quiet_NaN();
+                }
+            }
+        }
+        int ignoredFills = 0;
+        auto imported = decodePhrases(*phrases,
+                times,
+                track->getDuration(),
+                timingOffset,
+                finalBoundary,
+                &ignoredFills);
+        if (ignoredFills) {
+            qWarning() << "Ignored out-of-range Rekordbox phrase fills:"
+                       << ignoredFills << extPath;
+        }
+        track->setPhrases(std::move(imported));
+        return {};
+    } catch (const std::exception& error) {
+        qWarning() << "Could not import Rekordbox phrases:" << extPath << error.what();
+        return extPath;
+    }
+}
+
 void readAnalyze(TrackPointer track,
         mixxx::audio::SampleRate sampleRate,
         int timingOffset,
@@ -1484,6 +1545,7 @@ TrackPointer RekordboxPlaylistModel::getTrack(const QModelIndex& index) const {
     } else {
         mixxx::rekordbox::readAnalyze(track, sampleRate, timingOffset, false, anlzPath);
     }
+    mixxx::rekordbox::readPhrases(track, timingOffset, anlzPath);
 
     // Cues stored on the drive by this unit are the DJ's own and outrank the
     // ones rekordbox exported, so they go on last — after the ANLZ import has

@@ -47,6 +47,11 @@ constexpr double kVinylModeDefault = 1.0;
 // asks for a backspin; Long is a Technics-like brake and Short is half of it.
 constexpr double kVinylBrakeDefault = 0.0;
 
+// Overall-waveform division display: 0 = 30-second time scale, 1 = rekordbox
+// phrase data. RX3/AZ default to Phrase and fall back to the time scale for a
+// track that has no phrase analysis.
+constexpr double kWaveformDivisionsPhraseDefault = 1.0;
+
 // Hot cue gating (General settings tab). Shares one key with the config value
 // CueControl reads, so the CO seeds from it and writes straight back to it.
 // 1 = ungated: a press jumps to the cue and plays on from there, even from a
@@ -178,6 +183,16 @@ SystemSettings::SystemSettings(UserSettingsPointer pConfig,
             &ControlObject::valueChanged,
             this,
             &SystemSettings::onVinylBrakeChanged);
+
+    const ConfigKey waveformDivisionsKey(
+            kBiteDj, QStringLiteral("waveform_divisions"));
+    m_pCoWaveformDivisions = std::make_unique<ControlObject>(waveformDivisionsKey);
+    m_pCoWaveformDivisions->set(m_pConfig->getValue(
+            waveformDivisionsKey, kWaveformDivisionsPhraseDefault));
+    connect(m_pCoWaveformDivisions.get(),
+            &ControlObject::valueChanged,
+            this,
+            &SystemSettings::onWaveformDivisionsChanged);
 
     // Hot cue gating (General settings tab). CueControl reads the config value
     // on each activation rather than holding a proxy, so writing back on every
@@ -523,7 +538,7 @@ QStringList SystemSettings::mountsOnSameUsbDevice(int index) const {
     const UsbMount& target = m_usbMounts.at(index);
     // The tapped mount always goes first, so it is the one ejected while the
     // others are still mounted (i.e. the behaviour is unchanged for the common
-    // single-filesystem case, and a failure on a sibling cannot pre-empt it).
+    // single-filesystem case, and a failure on a sibling cannot preempt it).
     mountPoints.append(target.mountPoint);
 
     const QString node = mixxx::usbDeviceNodeForBlockDevice(target.device);
@@ -863,6 +878,11 @@ void SystemSettings::onVinylModeChanged(double value) {
 void SystemSettings::onVinylBrakeChanged(double value) {
     // Persist so the brake time is restored on the next launch.
     m_pConfig->setValue(ConfigKey(kBiteDj, QStringLiteral("vinyl_brake")), value);
+}
+
+void SystemSettings::onWaveformDivisionsChanged(double value) {
+    m_pConfig->setValue(ConfigKey(kBiteDj, QStringLiteral("waveform_divisions")),
+            value != 0.0 ? 1 : 0);
 }
 
 void SystemSettings::onHotcueActivatePlaysChanged(double value) {
