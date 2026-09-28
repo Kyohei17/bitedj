@@ -78,9 +78,27 @@ int PortMidiController::open() {
             return -2;
         }
     }
+    // Bite DJ: mark the controller open *before* applying the mapping, not
+    // after. The PortMIDI output stream itself is already open (just above),
+    // but MidiOutputHandler gates every send on Controller::isOpen() -- so with
+    // that flag still false, the updateAllOutputs() inside applyMapping()
+    // discards the initial value of every output ("not open for output!")
+    // instead of sending it.
+    //
+    // For most outputs that only costs the initial paint, because the next
+    // change re-sends. But an output whose control is *already* at its final
+    // value when the controller opens has no later edge to ride on and never
+    // reaches the device at all. Controllers are set up at the very end of
+    // startup, long after a deck can be loaded and playing, so that is the
+    // ordinary case for [BiteDJ],drive<N>_playing: the first track of a session
+    // is often already playing by now, and the eject daemon would never be told
+    // to flash that drive's LED until something else changed.
+    //
+    // Scripts are unaffected either way: their init() sends go straight to
+    // sendShortMsg, which gates on the PortMIDI stream rather than this flag.
+    setOpen(true);
     startEngine();
     applyMapping();
-    setOpen(true);
     return 0;
 }
 

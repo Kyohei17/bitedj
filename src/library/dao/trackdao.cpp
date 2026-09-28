@@ -556,11 +556,19 @@ bool insertTrackLocation(
     }
 }
 
-// Bind common values for insert/update
+// Bind common values for insert/update.
+//
+// With `beatsAndKeysInFsCache` true, the on-disk beats/keys blobs and their
+// versions are left empty in the home library table: the real data lives in
+// the per-USB analysis cache (FsAnalysisCache), so writing it here would waste
+// the space the home DB is being kept small for. The BPM float and the key
+// text are still written so browser rows and search stay functional without
+// hydrating from the stick — they are single fields, not blobs.
 void bindTrackLibraryValues(
         QSqlQuery* pTrackLibraryQuery,
         const mixxx::TrackRecord& track,
-        const mixxx::BeatsPointer& pBeats) {
+        const mixxx::BeatsPointer& pBeats,
+        bool beatsAndKeysInFsCache) {
     const mixxx::TrackMetadata& trackMetadata = track.getMetadata();
     const mixxx::TrackInfo& trackInfo = trackMetadata.getTrackInfo();
     const mixxx::AlbumInfo& albumInfo = trackMetadata.getAlbumInfo();
@@ -628,9 +636,15 @@ void bindTrackLibraryValues(
     // Fall back on cached BPM
     mixxx::Bpm bpm = trackInfo.getBpm();
     if (pBeats) {
-        beatsBlob = pBeats->toByteArray();
-        beatsVersion = pBeats->getVersion();
-        beatsSubVersion = pBeats->getSubVersion();
+        // The blob (and its version pair) is only bound to the home DB when
+        // the per-fs cache is off; the FS-cache path writes them to the stick
+        // instead. BPM is derived either way — it's a plain float, needed for
+        // browser rows without hydrating a full BeatsPointer.
+        if (!beatsAndKeysInFsCache) {
+            beatsBlob = pBeats->toByteArray();
+            beatsVersion = pBeats->getVersion();
+            beatsSubVersion = pBeats->getSubVersion();
+        }
         const auto trackEndPosition = mixxx::audio::FramePos{
                 trackMetadata.getStreamInfo().getDuration().toDoubleSeconds() *
                 pBeats->getSampleRate()};
@@ -643,9 +657,14 @@ void bindTrackLibraryValues(
     pTrackLibraryQuery->bindValue(":beats", beatsBlob);
 
     const Keys keys = track.getKeys();
-    QByteArray keysBlob = keys.toByteArray();
-    QString keysVersion = keys.getVersion();
-    QString keysSubVersion = keys.getSubVersion();
+    QByteArray keysBlob;
+    QString keysVersion;
+    QString keysSubVersion;
+    if (!beatsAndKeysInFsCache) {
+        keysBlob = keys.toByteArray();
+        keysVersion = keys.getVersion();
+        keysSubVersion = keys.getSubVersion();
+    }
     mixxx::track::io::key::ChromaticKey key = keys.getGlobalKey();
     QString keyText = keys.getGlobalKeyText();
     pTrackLibraryQuery->bindValue(":keys", keysBlob);
@@ -661,8 +680,9 @@ bool insertTrackLibrary(
         const mixxx::BeatsPointer& pBeats,
         DbId trackLocationId,
         const mixxx::FileInfo& fileInfo,
-        const QDateTime& trackDateAdded) {
-    bindTrackLibraryValues(pTrackLibraryInsert, trackRecord, pBeats);
+        const QDateTime& trackDateAdded,
+        bool beatsAndKeysInFsCache) {
+    bindTrackLibraryValues(pTrackLibraryInsert, trackRecord, pBeats, beatsAndKeysInFsCache);
 
     if (!trackRecord.getDateAdded().isNull()) {
         kLogger.debug() << "insertTrackLibrary: Track"
@@ -807,13 +827,15 @@ TrackId TrackDAO::addTracksAddTrack(const TrackPointer& pTrack, bool unremove) {
         // Time stamps are stored with timezone UTC in the database
         const auto trackDateAdded = QDateTime::currentDateTimeUtc();
         const auto trackRecord = pTrack->getRecord();
+        const bool beatsAndKeysInFsCache = m_fsAnalysisCache.isEnabled();
         if (!insertTrackLibrary(
                     m_pQueryLibraryInsert.get(),
                     trackRecord,
                     pTrack->getBeats(),
                     trackLocationId,
                     fileInfo,
-                    trackDateAdded)) {
+                    trackDateAdded,
+                    beatsAndKeysInFsCache)) {
             return TrackId();
         }
         trackId = TrackId(m_pQueryLibraryInsert->lastInsertId());
@@ -828,6 +850,14 @@ TrackId TrackDAO::addTracksAddTrack(const TrackPointer& pTrack, bool unremove) {
                     pTrack->getLocation(),
                     pTrack->getWaveform(),
                     pTrack->getWaveformSummary());
+            // Beats and keys blobs live on the stick alongside the waveform blobs
+            // when the fs cache is on — bindTrackLibraryValues() above wrote empty
+            // versions for them, so a home DB wipe (firmware update, or the boot
+            // size gate) drops no user data these calls have not already committed.
+            m_fsAnalysisCache.saveTrackBeats(
+                    pTrack->getLocation(), pTrack->getBeats());
+            m_fsAnalysisCache.saveTrackKeys(
+                    pTrack->getLocation(), pTrack->getKeys());
         } else if (m_fsAnalysisCache.isHomeCacheEnabled()) {
             m_analysisDao.saveTrackAnalyses(
                     trackId,
@@ -1548,6 +1578,36 @@ TrackPointer TrackDAO::getTrackById(TrackId trackId) const {
     // Populate track cues from the cues table.
     pTrack->setCuePoints(m_cueDao.getCuesForTrack(trackId));
 
+    // Beats and keys blobs live on the stick alongside the waveforms when the
+    // per-fs cache is on; the home library table's :beats/:keys columns were
+    // left empty on save, so setTrackBeats/setTrackKey() above only got the
+    // BPM float and key text — usable for browser rows but not a real beat
+    // grid. Hydrate the full data now, before markClean(), so the deck reads
+    // the same beats it would have if the blob had been in home.
+    if (m_fsAnalysisCache.isEnabled()) {
+        const QString trackLocation = pTrack->getLocation();
+        const mixxx::audio::SampleRate sampleRate = pTrack->getSampleRate();
+        // getSampleRate() may be zero if the audio-properties populator skipped
+        // (the header was never parsed) — Beats::fromByteArray() needs it to
+        // reconstruct positions, so leave the temporary constant-tempo grid the
+        // BPM path already installed rather than build a nonsense one.
+        if (sampleRate.isValid()) {
+            mixxx::BeatsPointer pFsBeats =
+                    m_fsAnalysisCache.getTrackBeats(trackLocation, sampleRate);
+            if (pFsBeats) {
+                if (pTrack->isBpmLocked()) {
+                    pTrack->trySetAndLockBeats(pFsBeats);
+                } else {
+                    pTrack->trySetBeats(pFsBeats);
+                }
+            }
+        }
+        std::optional<Keys> fsKeys = m_fsAnalysisCache.getTrackKeys(trackLocation);
+        if (fsKeys) {
+            pTrack->setKeys(*fsKeys);
+        }
+    }
+
     // Cues the DJ set on this unit live on the drive the track came from, so
     // that they follow the stick rather than this box's library. Apply them
     // before marking the track clean: they are the same cues the cues table
@@ -1726,10 +1786,12 @@ bool TrackDAO::updateTrack(const Track& track) const {
     query.bindValue(":track_id", trackId.toVariant());
 
     const auto trackRecord = track.getRecord();
+    const bool beatsAndKeysInFsCache = m_fsAnalysisCache.isEnabled();
     bindTrackLibraryValues(
             &query,
             trackRecord,
-            track.getBeats());
+            track.getBeats(),
+            beatsAndKeysInFsCache);
 
     if (!query.exec()) {
         LOG_FAILED_QUERY(query);
@@ -1750,6 +1812,10 @@ bool TrackDAO::updateTrack(const Track& track) const {
                 track.getLocation(),
                 track.getWaveform(),
                 track.getWaveformSummary());
+        // The blobs bindTrackLibraryValues() above left empty land on the
+        // stick instead — same reason as the insert path.
+        m_fsAnalysisCache.saveTrackBeats(track.getLocation(), track.getBeats());
+        m_fsAnalysisCache.saveTrackKeys(track.getLocation(), track.getKeys());
     } else if (m_fsAnalysisCache.isHomeCacheEnabled()) {
         m_analysisDao.saveTrackAnalyses(
                 trackId,

@@ -1,0 +1,58 @@
+<!--
+  One button parameter row in the BeatFX parameter list: label + a button
+  showing the current option (Off / On for toggles like Quantize and
+  Triplets, the option name for multi-state ones like Distortion's mode). A tap steps
+  to the next option.
+
+  Bound to button_parameter{N} of the slot rather than the fork's
+  [group],quantize / triplet proxies, so every button parameter an effect
+  declares shows up, whatever its slot index.
+-->
+<Template>
+  <SetVariable name="EffectGroup">[EffectRack<Variable name="rack"/>_EffectUnit<Variable name="unit"/>_Effect<Variable name="effect"/>]</SetVariable>
+  <WidgetGroup>
+    <ObjectName>BeatFX_ParamRow</ObjectName>
+    <Layout>horizontal</Layout>
+    <SizePolicy>me,min</SizePolicy>
+    <Children>
+
+      <EffectButtonParameterName>
+        <ObjectName>BeatFX_ParamLabel</ObjectName>
+        <Size>0me,36f</Size>
+        <Alignment>left</Alignment>
+        <Elide>right</Elide>
+        <EffectRack><Variable name="rack"/></EffectRack>
+        <EffectUnit><Variable name="unit"/></EffectUnit>
+        <Effect><Variable name="effect"/></Effect>
+        <EffectButtonParameter><Variable name="param"/></EffectButtonParameter>
+      </EffectButtonParameterName>
+
+      <EffectPushButton>
+        <ObjectName>BeatFX_ParamButton</ObjectName>
+        <Size>60f,32f</Size>
+        <ShowParameterValue>true</ShowParameterValue>
+        <NumberStates>2</NumberStates>
+        <State>
+          <Number>0</Number>
+          <Text>Off</Text>
+        </State>
+        <State>
+          <Number>1</Number>
+          <Text>On</Text>
+        </State>
+        <EffectRack><Variable name="rack"/></EffectRack>
+        <EffectUnit><Variable name="unit"/></EffectUnit>
+        <Effect><Variable name="effect"/></Effect>
+        <EffectButtonParameter><Variable name="param"/></EffectButtonParameter>
+        <Connection>
+          <ConfigKey><Variable name="EffectGroup"/>,button_parameter<Variable name="param"/></ConfigKey>
+        </Connection>
+      </EffectPushButton>
+
+    </Children>
+    <Connection>
+      <ConfigKey><Variable name="EffectGroup"/>,button_parameter<Variable name="param"/>_loaded</ConfigKey>
+      <BindProperty>visible</BindProperty>
+    </Connection>
+  </WidgetGroup>
+</Template>

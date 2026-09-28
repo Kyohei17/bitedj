@@ -33,8 +33,13 @@ KeyControl::KeyControl(const QString& group,
                   ConfigKey(group, "sync_key"))),
           m_pButtonResetKey(std::make_unique<ControlPushButton>(
                   ConfigKey(group, "reset_key"))),
-          // Coarse 2-semitone nudge, distinct from the 1-semitone
-          // pitch_up/pitch_down steppers PotmeterControls exposes.
+          // Whole-semitone nudges. Unlike the pitch_up/pitch_down steppers
+          // PotmeterControls exposes, these add exact semitones and clamp to
+          // the pitch knob's range.
+          m_pButtonPitchUp1(std::make_unique<ControlPushButton>(
+                  ConfigKey(group, "pitch_up_1"))),
+          m_pButtonPitchDown1(std::make_unique<ControlPushButton>(
+                  ConfigKey(group, "pitch_down_1"))),
           m_pButtonPitchUp2(std::make_unique<ControlPushButton>(
                   ConfigKey(group, "pitch_up_2"))),
           m_pButtonPitchDown2(std::make_unique<ControlPushButton>(
@@ -88,6 +93,18 @@ KeyControl::KeyControl(const QString& group,
             &ControlObject::valueChanged,
             this,
             &KeyControl::slotResetKey,
+            Qt::DirectConnection);
+
+    connect(m_pButtonPitchUp1.get(),
+            &ControlObject::valueChanged,
+            this,
+            &KeyControl::slotPitchUp1,
+            Qt::DirectConnection);
+
+    connect(m_pButtonPitchDown1.get(),
+            &ControlObject::valueChanged,
+            this,
+            &KeyControl::slotPitchDown1,
             Qt::DirectConnection);
 
     connect(m_pButtonPitchUp2.get(),
@@ -476,19 +493,33 @@ void KeyControl::slotResetKey(double v) {
     }
 }
 
+void KeyControl::nudgePitch(double semitones) {
+    double newPitch = math_clamp(m_pPitch->get() + semitones, -6.0, 6.0);
+    m_pPitch->set(newPitch);
+    slotPitchChanged(newPitch);
+}
+
+void KeyControl::slotPitchUp1(double v) {
+    if (v > 0) {
+        nudgePitch(1.0);
+    }
+}
+
+void KeyControl::slotPitchDown1(double v) {
+    if (v > 0) {
+        nudgePitch(-1.0);
+    }
+}
+
 void KeyControl::slotPitchUp2(double v) {
     if (v > 0) {
-        double newPitch = math_clamp(m_pPitch->get() + 2.0, -6.0, 6.0);
-        m_pPitch->set(newPitch);
-        slotPitchChanged(newPitch);
+        nudgePitch(2.0);
     }
 }
 
 void KeyControl::slotPitchDown2(double v) {
     if (v > 0) {
-        double newPitch = math_clamp(m_pPitch->get() - 2.0, -6.0, 6.0);
-        m_pPitch->set(newPitch);
-        slotPitchChanged(newPitch);
+        nudgePitch(-2.0);
     }
 }
 

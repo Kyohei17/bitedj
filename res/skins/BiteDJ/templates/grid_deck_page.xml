@@ -1,0 +1,263 @@
+<!--
+  One deck's page on the GRID tab of the Overview panel (effects.xml): the
+  beat grid editor. The panel sits directly beside the waveforms, so the beat
+  markers you are correcting stay on screen while you correct them.
+
+  The deck tabs at the top are part of the page, not of the tab bar above it,
+  so both pages carry an identical pair and the bar looks continuous while the
+  stack swaps under it. A tab writes its deck's stack trigger, which both
+  selects the deck and lights the tab: WWidgetStack holds the visible page's
+  trigger at 1 and the rest at 0, so the same connection drives the press and
+  the highlight. Select-only, like the FX / KEY tabs and the cue drawer — a
+  tap on the deck already showing is a no-op.
+
+  Every action is a stock BpmControl push control on [Channel<N>] and edits
+  the loaded track's grid in place (Mixxx writes it back to the library):
+
+    Earlier / Later    beats_translate_{earlier,later}  - 10 ms per step
+    Align              beats_translate_curpos           - nearest beat to playhead
+    BPM - / +          beats_adjust_{slower,faster}     - 0.01 BPM per step
+    /2 and x2          beats_set_{halve,double}         - fix a doubled analysis
+    Undo               beats_undo_adjustment            - one step back
+
+  The two step sizes are deliberately fine, which makes them useless as single
+  taps: nudging a grid 200 ms would be twenty presses. Those four buttons are
+  <Repeat>ing, so holding one keeps it firing, and the repeat accelerates — a
+  brief hold still steps finely, a long one covers ground (see
+  WPushButton::slotRepeat).
+
+  Align sits at the end of the row, away from the two arrows: it snaps the grid
+  to the playhead, so it throws away the nudging the arrows beside it just did.
+  "Align" rather than "Reset" because Undo, two rows down, is the button that
+  restores the analyzed grid — two reverts named alike would be worse.
+
+  Undo takes its enabled state from beats_undo_possible. Greyed out it swallows
+  the tap outright — a disabled WWidget never synthesizes touch -> mouse — so
+  there is no way to "undo" past the loaded grid. The action block as a whole
+  follows track_loaded for the same reason: no track, no grid to edit.
+
+  Variables:
+    channel: channel number (e.g. 1, 2)
+-->
+<Template>
+  <WidgetGroup>
+    <ObjectName>Grid_DeckPage_<Variable name="channel"/></ObjectName>
+    <Layout>vertical</Layout>
+    <SizePolicy>me,me</SizePolicy>
+    <Children>
+
+      <WidgetGroup>
+        <ObjectName>Grid_DeckBar</ObjectName>
+        <Layout>horizontal</Layout>
+        <Size>0me,30f</Size>
+        <Children>
+          <PushButton>
+            <ObjectName>Grid_DeckTab1</ObjectName>
+            <Size>32f,30f</Size>
+            <NumberStates>2</NumberStates>
+            <State>
+              <Number>0</Number>
+              <Text>1</Text>
+            </State>
+            <State>
+              <Number>1</Number>
+              <Text>1</Text>
+            </State>
+            <LeftClickIsPushButton>true</LeftClickIsPushButton>
+            <Connection>
+              <ConfigKey>[Skin],grid_deck1</ConfigKey>
+              <EmitOnDownPress>true</EmitOnDownPress>
+            </Connection>
+          </PushButton>
+          <PushButton>
+            <ObjectName>Grid_DeckTab2</ObjectName>
+            <Size>32f,30f</Size>
+            <NumberStates>2</NumberStates>
+            <State>
+              <Number>0</Number>
+              <Text>2</Text>
+            </State>
+            <State>
+              <Number>1</Number>
+              <Text>2</Text>
+            </State>
+            <LeftClickIsPushButton>true</LeftClickIsPushButton>
+            <Connection>
+              <ConfigKey>[Skin],grid_deck2</ConfigKey>
+              <EmitOnDownPress>true</EmitOnDownPress>
+            </Connection>
+          </PushButton>
+
+          <!-- The grid's own BPM, not the deck's: local_bpm ignores the rate
+               slider, so the number only moves when the grid itself does. -->
+          <NumberBpm>
+            <ObjectName>Grid_Bpm</ObjectName>
+            <Size>0me,30f</Size>
+            <NumberOfDigits>2</NumberOfDigits>
+            <Alignment>right</Alignment>
+            <Channel><Variable name="channel"/></Channel>
+            <Connection>
+              <ConfigKey>[Channel<Variable name="channel"/>],local_bpm</ConfigKey>
+            </Connection>
+          </NumberBpm>
+        </Children>
+      </WidgetGroup>
+
+      <WidgetGroup>
+        <ObjectName>Grid_Actions</ObjectName>
+        <Layout>vertical</Layout>
+        <SizePolicy>me,me</SizePolicy>
+        <Children>
+
+          <WidgetGroup>
+            <ObjectName>Grid_ButtonRow</ObjectName>
+            <Layout>horizontal</Layout>
+            <Size>0me,42f</Size>
+            <Children>
+              <PushButton>
+                <ObjectName>Grid_Nudge</ObjectName>
+                <Size>0me,42f</Size>
+                <NumberStates>1</NumberStates>
+                <State>
+                  <Number>0</Number>
+                  <Text>&#9664;</Text>
+                </State>
+                <Repeat>true</Repeat>
+                <Connection>
+                  <ConfigKey>[Channel<Variable name="channel"/>],beats_translate_earlier</ConfigKey>
+                  <ConnectValueToWidget>false</ConnectValueToWidget>
+                </Connection>
+              </PushButton>
+              <PushButton>
+                <ObjectName>Grid_Nudge</ObjectName>
+                <Size>0me,42f</Size>
+                <NumberStates>1</NumberStates>
+                <State>
+                  <Number>0</Number>
+                  <Text>&#9654;</Text>
+                </State>
+                <Repeat>true</Repeat>
+                <Connection>
+                  <ConfigKey>[Channel<Variable name="channel"/>],beats_translate_later</ConfigKey>
+                  <ConnectValueToWidget>false</ConnectValueToWidget>
+                </Connection>
+              </PushButton>
+              <PushButton>
+                <ObjectName>Grid_Align</ObjectName>
+                <Size>0me,42f</Size>
+                <NumberStates>1</NumberStates>
+                <State>
+                  <Number>0</Number>
+                  <Text>Align</Text>
+                </State>
+                <Connection>
+                  <ConfigKey>[Channel<Variable name="channel"/>],beats_translate_curpos</ConfigKey>
+                  <ConnectValueToWidget>false</ConnectValueToWidget>
+                  <EmitOnDownPress>true</EmitOnDownPress>
+                </Connection>
+              </PushButton>
+            </Children>
+          </WidgetGroup>
+
+          <WidgetGroup>
+            <ObjectName>Grid_ButtonRow</ObjectName>
+            <Layout>horizontal</Layout>
+            <Size>0me,42f</Size>
+            <Children>
+              <PushButton>
+                <ObjectName>Grid_Bpm_Down</ObjectName>
+                <Size>0me,42f</Size>
+                <NumberStates>1</NumberStates>
+                <State>
+                  <Number>0</Number>
+                  <Text>BPM &#8722;</Text>
+                </State>
+                <Repeat>true</Repeat>
+                <Connection>
+                  <ConfigKey>[Channel<Variable name="channel"/>],beats_adjust_slower</ConfigKey>
+                  <ConnectValueToWidget>false</ConnectValueToWidget>
+                </Connection>
+              </PushButton>
+              <PushButton>
+                <ObjectName>Grid_Bpm_Up</ObjectName>
+                <Size>0me,42f</Size>
+                <NumberStates>1</NumberStates>
+                <State>
+                  <Number>0</Number>
+                  <Text>BPM +</Text>
+                </State>
+                <Repeat>true</Repeat>
+                <Connection>
+                  <ConfigKey>[Channel<Variable name="channel"/>],beats_adjust_faster</ConfigKey>
+                  <ConnectValueToWidget>false</ConnectValueToWidget>
+                </Connection>
+              </PushButton>
+            </Children>
+          </WidgetGroup>
+
+          <WidgetGroup>
+            <ObjectName>Grid_ButtonRow</ObjectName>
+            <Layout>horizontal</Layout>
+            <Size>0me,44f</Size>
+            <Children>
+              <PushButton>
+                <ObjectName>Grid_Scale</ObjectName>
+                <Size>0me,44f</Size>
+                <NumberStates>1</NumberStates>
+                <State>
+                  <Number>0</Number>
+                  <Text>&#247;2</Text>
+                </State>
+                <Connection>
+                  <ConfigKey>[Channel<Variable name="channel"/>],beats_set_halve</ConfigKey>
+                  <ConnectValueToWidget>false</ConnectValueToWidget>
+                  <EmitOnDownPress>true</EmitOnDownPress>
+                </Connection>
+              </PushButton>
+              <PushButton>
+                <ObjectName>Grid_Scale</ObjectName>
+                <Size>0me,44f</Size>
+                <NumberStates>1</NumberStates>
+                <State>
+                  <Number>0</Number>
+                  <Text>&#215;2</Text>
+                </State>
+                <Connection>
+                  <ConfigKey>[Channel<Variable name="channel"/>],beats_set_double</ConfigKey>
+                  <ConnectValueToWidget>false</ConnectValueToWidget>
+                  <EmitOnDownPress>true</EmitOnDownPress>
+                </Connection>
+              </PushButton>
+              <PushButton>
+                <ObjectName>Grid_Undo</ObjectName>
+                <Size>0me,44f</Size>
+                <NumberStates>1</NumberStates>
+                <State>
+                  <Number>0</Number>
+                  <Text>Undo</Text>
+                </State>
+                <Connection>
+                  <ConfigKey>[Channel<Variable name="channel"/>],beats_undo_adjustment</ConfigKey>
+                  <ConnectValueToWidget>false</ConnectValueToWidget>
+                  <EmitOnDownPress>true</EmitOnDownPress>
+                </Connection>
+                <Connection>
+                  <ConnectValueFromWidget>false</ConnectValueFromWidget>
+                  <ConfigKey>[Channel<Variable name="channel"/>],beats_undo_possible</ConfigKey>
+                  <BindProperty>enabled</BindProperty>
+                </Connection>
+              </PushButton>
+            </Children>
+          </WidgetGroup>
+
+        </Children>
+        <Connection>
+          <ConnectValueFromWidget>false</ConnectValueFromWidget>
+          <ConfigKey>[Channel<Variable name="channel"/>],track_loaded</ConfigKey>
+          <BindProperty>enabled</BindProperty>
+        </Connection>
+      </WidgetGroup>
+
+    </Children>
+  </WidgetGroup>
+</Template>

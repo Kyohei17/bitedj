@@ -13,7 +13,9 @@
 
 #include "preferences/usersettings.h"
 
+class BaseTrackPlayer;
 class ControlObject;
+class ControlProxy;
 class ControlPushButton;
 class PlayerManager;
 class RecordingManager;
@@ -84,6 +86,40 @@ class SystemSettings : public QObject {
     // safely while any of them is still mounted.
     void ejectRow(int index);
 
+    // Whether a track loaded from the drive on physical USB port `driveNumber`
+    // is currently playing in any deck, sampler or preview deck. 1-based,
+    // mirroring ejectDrive(); false for an unconfigured port or one with
+    // nothing mounted. This is what [BiteDJ],drive<N>_playing publishes.
+    bool isDrivePlaying(int driveNumber) const;
+
+    // The drive-playing rule, in four static pieces. updateDrivePlaying() is
+    // these plus the CO writes, and nothing else — split out because resolving a
+    // drive *number* to a mountpoint walks the real USB topology in sysfs, so a
+    // test that went in through the drive number could only ever run on the
+    // appliance. Given mountpoints, the rule itself is testable anywhere.
+
+    // Locations of the tracks currently playing in `players`. "Playing" is the
+    // player's own play CO, not audibility: a track running into a closed fader
+    // is still the drive being read, which is what the LED reports.
+    static QStringList playingTrackLocations(const QList<BaseTrackPlayer*>& players);
+
+    // Whether any of `locations` lives on the filesystem mounted at
+    // `mountPoint`. Matches on the mountpoint plus a separator, so /media/USB
+    // does not swallow /media/USB2. Always false for an empty mountpoint —
+    // that is how an unconfigured or empty USB port is spelled.
+    static bool anyLocationUnderMount(const QStringList& locations, const QString& mountPoint);
+
+    // The first of `mountPoints` that has one of `locations` under it, or an
+    // empty string when none does — anyLocationUnderMount() over a list, with
+    // the match named rather than reduced to a flag, so a refusal can say which
+    // drive is the one being read from.
+    static QString mountPlayingFrom(
+            const QStringList& locations, const QStringList& mountPoints);
+
+    // One flag per entry of `driveMountPoints`, in the same order.
+    static QList<bool> drivesPlaying(const QList<BaseTrackPlayer*>& players,
+            const QStringList& driveMountPoints);
+
     // Ejects whatever drive is currently mounted on the physical USB port
     // configured as [BiteDJ],usb_drive_path_<driveNumber> (a sysfs topology
     // name like "1-1.5"). 1-based; no-op with a notification when the port is
@@ -103,6 +139,9 @@ class SystemSettings : public QObject {
     // while a recording is running is refused with a notification (the in-skin
     // buttons for the other drives are disabled, so this only guards callers
     // reaching the API directly).
+    //
+    // A drive that is backing a playing track is refused as well: the recorder
+    // would be writing to the same stick a deck is reading its audio off.
     void toggleRecordRow(int index);
 
   signals:
@@ -136,6 +175,10 @@ class SystemSettings : public QObject {
     // what reports a stop we did not ask for (write error, encoder failure).
     void onEngineRecordingChanged(bool active);
     void onRecordingStartTimeout();
+    // Recomputes every [BiteDJ],drive<N>_playing CO from the current player and
+    // mount state, writing only the ones that actually changed. Cheap enough to
+    // call from any of the many things that can change the answer.
+    void updateDrivePlaying();
 
   private:
     // Re-enumerates mounted USB drives. Unless `force` is set, returns without
@@ -168,10 +211,39 @@ class SystemSettings : public QObject {
     bool tryUnmount(const QString& mountPoint, QString* pError);
     // Row index of the mount at `mountPoint` in the current enumeration, or -1.
     int rowIndexForMountPoint(const QString& mountPoint) const;
+    // Every deck, sampler and preview deck, in that order. Null entries are
+    // possible (a player index that does not resolve) and callers skip them.
+    QList<BaseTrackPlayer*> allPlayers() const;
+    // Re-points the per-player playback watches (each player's play CO and its
+    // load/unload signals) at the players that exist right now, dropping the
+    // previous set. Run once at construction and again whenever the deck or
+    // sampler count changes.
+    void rebuildPlaybackWatches();
+    // Fills m_driveMountPoints from [BiteDJ],usb_drive_path_<N> and the current
+    // enumeration: entry N-1 is the mountpoint of the drive on USB port N, or
+    // empty when that port is unconfigured or carries nothing.
+    void refreshDriveMountPoints();
+
+    // Mountpoint of the filesystem on the same physical USB device as the mount
+    // at `index` that is currently backing a playing track, or an empty string
+    // when nothing on that drive is playing. Not just the indexed mount: a
+    // second partition on the same stick is the same flash and the same bus.
+    QString playingMountOnUsbDeviceOf(int index) const;
+
+    // Warns once when a track starts playing off the drive being recorded to.
+    // The start of a recording is refused in that situation (see
+    // toggleRecordRow), but the DJ can still load and play a track off the
+    // recording drive afterwards, and nothing stops them mid-set — this only
+    // tells them the risk they just took. Cheap when nothing is recording,
+    // which is the state it is called in almost every time.
+    //
+    // Latched: re-warns only after the contention has cleared, so it does not
+    // repeat on every play/load edge and poll tick for as long as the track runs.
+    void warnOnRecordingDriveContention();
 
     // Points [Recording],Directory at <mount>/Recordings on the indexed drive
     // and asks RecordingManager to start. Notifies and does nothing when the
-    // directory cannot be created.
+    // directory cannot be created, or when a track is playing off that drive.
     void startRecordingToRow(int index);
     // Stops a recording in progress (no-op when there is none) and reports the
     // file it wrote. `reason` is prepended to that notification when the stop
@@ -210,6 +282,11 @@ class SystemSettings : public QObject {
     // Whether the engine has confirmed the recording is actually running. Until
     // it does, the target is provisional and the watchdog below owns it.
     bool m_recordingStarted = false;
+    // Whether the drive being recorded to is currently also being read by a
+    // playing deck, and has already been warned about. The latch for
+    // warnOnRecordingDriveContention(); cleared once nothing on the drive is
+    // playing any more, so the next track that starts off it warns again.
+    bool m_recordingDriveContended = false;
     // The recorder opens its file on the audio thread, so a start that can
     // never work (no audio device, so no callback; unwritable drive) is
     // reported by nothing happening. Bounds the wait rather than leaving the
@@ -237,6 +314,22 @@ class SystemSettings : public QObject {
     // Emitted from the controller thread; the queued connection hops the eject
     // onto this (main) thread, which ejectRow() requires.
     std::vector<std::unique_ptr<ControlPushButton>> m_ejectDriveCos;
+
+    // [BiteDJ],drive<N>_playing — 1 while a track that lives on the drive
+    // plugged into USB port N is playing somewhere. Read-only: the value is
+    // derived state, and the only consumer is the eject-button daemon's MIDI
+    // output mapping, which lights that port's red LED with it.
+    std::vector<std::unique_ptr<ControlObject>> m_drivePlayingCos;
+    // Mountpoint per drive number, index N-1. Recomputed on every enumeration
+    // change rather than per query: resolving a drive number to a mountpoint
+    // walks sysfs, and the playing state is recomputed far more often than the
+    // mount set changes.
+    QStringList m_driveMountPoints;
+    // One proxy per player on its play CO, plus the load/unload connections on
+    // the players themselves. Together these are every event that can change
+    // what drive<N>_playing should be, short of the mount set moving.
+    std::vector<std::unique_ptr<ControlProxy>> m_playWatches;
+    QList<QMetaObject::Connection> m_playerConnections;
 
     // Automatic USB detection. The watcher fires directoryChanged when a drive is
     // mounted/unmounted under a removable root, giving near-instant updates; the

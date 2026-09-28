@@ -312,8 +312,10 @@ PioneerDDJ400.beatFxLevelDepthRotate = function(_channel, _control, value) {
 // LEFT/RIGHT buttons step through the on-screen bucket grid of the
 // loaded Beats-typed parameter instead of switching focused slot.
 // Order matches the row template's reading order
-// (⅛ → ¼ → ½ → 1 → 2 → 4), values are raw rate-in-cycles-per-beat.
-PioneerDDJ400.beatFxBuckets = [8, 4, 2, 1, 0.5, 0.25];
+// (⅛ → ¼ → ½ → 1 → 2 → 4), values are periods in beats. parameterN_beat_period
+// converts them to each effect's native encoding (e.g. Tremolo's rate is in
+// cycles per beat) and reports the value the effect actually clamped to.
+PioneerDDJ400.beatFxBuckets = [0.125, 0.25, 0.5, 1, 2, 4];
 
 PioneerDDJ400.findBeatsParameter = function(group) {
     for (let i = 1; i <= 16; i++) {
@@ -333,7 +335,7 @@ PioneerDDJ400.stepBeatFxBucket = function(direction) {
     if (paramIndex === -1) { return; }
 
     const buckets = PioneerDDJ400.beatFxBuckets;
-    const valueKey = "parameter" + paramIndex + "_value";
+    const valueKey = "parameter" + paramIndex + "_beat_period";
     const current = engine.getValue(group, valueKey);
 
     // Snap to nearest bucket, then step. Off-bucket values (rare —

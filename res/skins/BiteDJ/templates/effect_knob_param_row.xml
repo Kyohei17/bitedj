@@ -1,0 +1,82 @@
+<!--
+  One continuous knob parameter row in the BeatFX parameter list: label +
+  knob. Beats-typed slots are skipped here (effect_param_row.xml renders
+  them as bucket pickers, first in the list), and so is the effect's own
+  dry/wet (parameter{N}_is_mix): the unit Mix already covers it, and the
+  hidden knob keeps its value, saved preset and Super link.
+
+  Dragging on the knob turns it; dragging on the label scrolls the list
+  (see ContentDragScroller).
+
+  Composite visibility (loaded AND not Beats AND not mix) is built out of
+  nested WidgetGroups, one binding each. Only the innermost one carries the
+  row's padding, so a hidden row leaves no gap behind.
+-->
+<Template>
+  <SetVariable name="EffectGroup">[EffectRack<Variable name="rack"/>_EffectUnit<Variable name="unit"/>_Effect<Variable name="effect"/>]</SetVariable>
+  <WidgetGroup>
+    <Layout>vertical</Layout>
+    <SizePolicy>me,min</SizePolicy>
+    <Children>
+      <WidgetGroup>
+        <Layout>vertical</Layout>
+        <SizePolicy>me,min</SizePolicy>
+        <Children>
+          <WidgetGroup>
+            <ObjectName>BeatFX_ParamRow</ObjectName>
+            <Layout>horizontal</Layout>
+            <SizePolicy>me,min</SizePolicy>
+            <Children>
+
+              <EffectParameterName>
+                <ObjectName>BeatFX_ParamLabel</ObjectName>
+                <Size>0me,40f</Size>
+                <Alignment>left</Alignment>
+                <Elide>right</Elide>
+                <EffectRack><Variable name="rack"/></EffectRack>
+                <EffectUnit><Variable name="unit"/></EffectUnit>
+                <Effect><Variable name="effect"/></Effect>
+                <EffectParameter><Variable name="param"/></EffectParameter>
+              </EffectParameterName>
+
+              <EffectParameterKnobComposed>
+                <ObjectName>BeatFX_ParamKnob</ObjectName>
+                <Size>40f,40f</Size>
+                <Knob scalemode="STRETCH_ASPECT">icons/knob.svg</Knob>
+                <MinAngle>-230</MinAngle>
+                <MaxAngle>50</MaxAngle>
+                <EffectRack><Variable name="rack"/></EffectRack>
+                <EffectUnit><Variable name="unit"/></EffectUnit>
+                <Effect><Variable name="effect"/></Effect>
+                <EffectParameter><Variable name="param"/></EffectParameter>
+                <Connection>
+                  <ConfigKey><Variable name="EffectGroup"/>,parameter<Variable name="param"/></ConfigKey>
+                </Connection>
+              </EffectParameterKnobComposed>
+
+            </Children>
+            <Connection>
+              <ConfigKey><Variable name="EffectGroup"/>,parameter<Variable name="param"/>_is_mix</ConfigKey>
+              <BindProperty>visible</BindProperty>
+              <Transform>
+                <Not/>
+              </Transform>
+            </Connection>
+          </WidgetGroup>
+        </Children>
+        <Connection>
+          <ConfigKey><Variable name="EffectGroup"/>,parameter<Variable name="param"/>_units</ConfigKey>
+          <BindProperty>visible</BindProperty>
+          <Transform>
+            <IsEqual>1</IsEqual>
+            <Not/>
+          </Transform>
+        </Connection>
+      </WidgetGroup>
+    </Children>
+    <Connection>
+      <ConfigKey><Variable name="EffectGroup"/>,parameter<Variable name="param"/>_loaded</ConfigKey>
+      <BindProperty>visible</BindProperty>
+    </Connection>
+  </WidgetGroup>
+</Template>

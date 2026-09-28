@@ -14,6 +14,7 @@
 
 #include "analyzer/trackanalysisscheduler.h"
 #include "control/controlobject.h"
+#include "control/controlproxy.h"
 #include "control/controlpushbutton.h"
 #include "library/dao/fsanalysiscache.h"
 #include "library/dao/fshistoryworker.h"
@@ -216,6 +217,36 @@ SystemSettings::SystemSettings(UserSettingsPointer pConfig,
         m_ejectDriveCos.push_back(std::move(pCo));
     }
 
+    // Per-drive "something off this stick is playing", addressed by the same
+    // physical USB port number as the eject buttons above. Derived state, so
+    // read-only; updateDrivePlaying() is the only writer.
+    for (int drive = 1; drive <= kNumEjectDrives; ++drive) {
+        auto pCo = std::make_unique<ControlObject>(ConfigKey(
+                kBiteDj, QStringLiteral("drive%1_playing").arg(drive)));
+        pCo->setReadOnly();
+        m_drivePlayingCos.push_back(std::move(pCo));
+    }
+
+    // A deck or sampler appearing or disappearing changes which play COs we
+    // have to be watching. Decks and samplers are both built before us on this
+    // appliance, so in practice this only fires if the user changes the deck
+    // count in preferences — but a watch set that silently went stale would
+    // leave the LED stuck on whatever the removed player was last doing.
+    if (m_pPlayerManager) {
+        const auto onPlayerCountChanged = [this](int) {
+            rebuildPlaybackWatches();
+            updateDrivePlaying();
+        };
+        connect(m_pPlayerManager.get(),
+                &PlayerManager::numberOfDecksChanged,
+                this,
+                onPlayerCountChanged);
+        connect(m_pPlayerManager.get(),
+                &PlayerManager::numberOfSamplersChanged,
+                this,
+                onPlayerCountChanged);
+    }
+
     // Per-drive recording (Record button on each USB row). The engine is the
     // authority on whether the recorder is running: it opens the file on the
     // audio thread, so a start is only real once it says so, and it is also
@@ -259,11 +290,16 @@ SystemSettings::SystemSettings(UserSettingsPointer pConfig,
         // pick it up before re-enumerating.
         rearmUsbWatches();
         refresh();
+        // Backstop for the per-player watches below, which are event-driven and
+        // therefore only as complete as the set of players they were built for.
+        // Costs a handful of CO reads and string compares every 3s.
+        updateDrivePlaying();
     });
     m_usbPoll.start();
 
     s_pInstance.storeRelease(this);
 
+    rebuildPlaybackWatches();
     rearmUsbWatches();
     refresh(true);
 }
@@ -453,6 +489,180 @@ void SystemSettings::refresh(bool force) {
     for (const QString& mountPoint : std::as_const(removedMountPoints)) {
         emit mountEjected(mountPoint);
     }
+
+    // The mount set just moved, so both halves of the playing state can have
+    // changed: which mountpoint a drive number resolves to, and therefore
+    // whether the track playing off it is still on that drive at all.
+    refreshDriveMountPoints();
+    updateDrivePlaying();
+}
+
+void SystemSettings::refreshDriveMountPoints() {
+    QStringList mountPoints;
+    for (int drive = 1; drive <= kNumEjectDrives; ++drive) {
+        QString mountPoint;
+        const QString usbPath = m_pConfig->getValue(
+                ConfigKey(kBiteDj, QStringLiteral("usb_drive_path_%1").arg(drive)),
+                QString());
+        if (!usbPath.isEmpty()) {
+            for (const UsbMount& mount : std::as_const(m_usbMounts)) {
+                if (deviceOnUsbPath(mount.device, usbPath)) {
+                    mountPoint = mount.mountPoint;
+                    break;
+                }
+            }
+        }
+        mountPoints.append(mountPoint);
+    }
+    m_driveMountPoints = std::move(mountPoints);
+}
+
+QList<BaseTrackPlayer*> SystemSettings::allPlayers() const {
+    QList<BaseTrackPlayer*> players;
+    if (!m_pPlayerManager) {
+        return players;
+    }
+    for (int i = 0; i < m_pPlayerManager->numberOfDecks(); ++i) {
+        players.append(m_pPlayerManager->getDeckBase(i));
+    }
+    for (int i = 0; i < m_pPlayerManager->numberOfSamplers(); ++i) {
+        players.append(m_pPlayerManager->getSampler(i));
+    }
+    for (int i = 0; i < m_pPlayerManager->numberOfPreviewDecks(); ++i) {
+        players.append(m_pPlayerManager->getPreviewDeck(i));
+    }
+    return players;
+}
+
+void SystemSettings::rebuildPlaybackWatches() {
+    for (const QMetaObject::Connection& connection : std::as_const(m_playerConnections)) {
+        QObject::disconnect(connection);
+    }
+    m_playerConnections.clear();
+    // Destroyed here, on the thread that created them, which is what ControlProxy
+    // requires: a proxy deleted with a signal in flight from another thread is a
+    // crash (Mixxx issue #7773). Everything here runs on the GUI thread.
+    m_playWatches.clear();
+
+    const QList<BaseTrackPlayer*> players = allPlayers();
+    for (BaseTrackPlayer* pPlayer : players) {
+        if (!pPlayer) {
+            continue;
+        }
+        // What changes the answer, in two parts: the deck starting or stopping,
+        // and the deck swapping the track under an unchanged play state. A load
+        // into a running deck moves the LED from one drive to another without
+        // play ever leaving 1, so watching play alone is not enough.
+        const auto onPlaybackChanged = [this]() {
+            updateDrivePlaying();
+        };
+        m_playerConnections.append(connect(pPlayer,
+                &BaseTrackPlayer::newTrackLoaded,
+                this,
+                onPlaybackChanged));
+        m_playerConnections.append(connect(pPlayer,
+                &BaseTrackPlayer::trackUnloaded,
+                this,
+                onPlaybackChanged));
+        auto pPlayWatch = std::make_unique<ControlProxy>(
+                ConfigKey(pPlayer->getGroup(), QStringLiteral("play")),
+                this,
+                ControlFlag::NoAssertIfMissing);
+        pPlayWatch->connectValueChanged(this, [this](double) {
+            updateDrivePlaying();
+        });
+        m_playWatches.push_back(std::move(pPlayWatch));
+    }
+}
+
+bool SystemSettings::isDrivePlaying(int driveNumber) const {
+    if (driveNumber < 1 || driveNumber > kNumEjectDrives) {
+        return false;
+    }
+    return m_drivePlayingCos[driveNumber - 1]->get() != 0.0;
+}
+
+// static
+QStringList SystemSettings::playingTrackLocations(const QList<BaseTrackPlayer*>& players) {
+    QStringList locations;
+    for (BaseTrackPlayer* pPlayer : players) {
+        if (!pPlayer) {
+            continue;
+        }
+        TrackPointer pTrack = pPlayer->getLoadedTrack();
+        if (!pTrack) {
+            continue;
+        }
+        if (ControlObject::get(ConfigKey(pPlayer->getGroup(),
+                    QStringLiteral("play"))) <= 0.0) {
+            continue;
+        }
+        locations.append(pTrack->getLocation());
+    }
+    return locations;
+}
+
+// static
+bool SystemSettings::anyLocationUnderMount(
+        const QStringList& locations, const QString& mountPoint) {
+    if (mountPoint.isEmpty()) {
+        return false;
+    }
+    QString prefix = QDir::cleanPath(mountPoint);
+    if (!prefix.endsWith(QLatin1Char('/'))) {
+        prefix.append(QLatin1Char('/'));
+    }
+    for (const QString& location : locations) {
+        if (location.startsWith(prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// static
+QString SystemSettings::mountPlayingFrom(
+        const QStringList& locations, const QStringList& mountPoints) {
+    for (const QString& mountPoint : mountPoints) {
+        if (anyLocationUnderMount(locations, mountPoint)) {
+            return mountPoint;
+        }
+    }
+    return QString();
+}
+
+// static
+QList<bool> SystemSettings::drivesPlaying(
+        const QList<BaseTrackPlayer*>& players, const QStringList& driveMountPoints) {
+    // Collect the playing tracks once and test them against every drive rather
+    // than walking the players per drive: a track can only be on one of them,
+    // and getLoadedTrack() takes the player's lock.
+    const QStringList locations = playingTrackLocations(players);
+    QList<bool> playing;
+    playing.reserve(driveMountPoints.size());
+    for (const QString& mountPoint : driveMountPoints) {
+        playing.append(anyLocationUnderMount(locations, mountPoint));
+    }
+    return playing;
+}
+
+void SystemSettings::updateDrivePlaying() {
+    // Same inputs, and every caller that can change one can change the other:
+    // a track starting, stopping, or being swapped in a running deck.
+    warnOnRecordingDriveContention();
+    if (m_drivePlayingCos.empty()) {
+        return;
+    }
+    const QList<bool> playing = drivesPlaying(allPlayers(), m_driveMountPoints);
+    for (int drive = 1; drive <= kNumEjectDrives; ++drive) {
+        // Only on a real change: a read-only CO's forceSet emits unconditionally,
+        // and this runs on every play/load event and every poll tick.
+        const double value = playing.value(drive - 1) ? 1.0 : 0.0;
+        ControlObject* pCo = m_drivePlayingCos[drive - 1].get();
+        if (pCo->get() != value) {
+            pCo->forceSet(value);
+        }
+    }
 }
 
 int SystemSettings::unloadTracksOnMount(const QString& mountPoint) {
@@ -465,16 +675,7 @@ int SystemSettings::unloadTracksOnMount(const QString& mountPoint) {
         prefix.append(QLatin1Char('/'));
     }
 
-    QList<BaseTrackPlayer*> players;
-    for (int i = 0; i < m_pPlayerManager->numberOfDecks(); ++i) {
-        players.append(m_pPlayerManager->getDeckBase(i));
-    }
-    for (int i = 0; i < m_pPlayerManager->numberOfSamplers(); ++i) {
-        players.append(m_pPlayerManager->getSampler(i));
-    }
-    for (int i = 0; i < m_pPlayerManager->numberOfPreviewDecks(); ++i) {
-        players.append(m_pPlayerManager->getPreviewDeck(i));
-    }
+    const QList<BaseTrackPlayer*> players = allPlayers();
 
     int unloaded = 0;
     for (BaseTrackPlayer* pPlayer : std::as_const(players)) {
@@ -725,6 +926,58 @@ void SystemSettings::toggleRecordRow(int index) {
     startRecordingToRow(index);
 }
 
+void SystemSettings::warnOnRecordingDriveContention() {
+    if (m_recordingMountPoint.isEmpty()) {
+        // Nothing is recording, so nothing to contend with — and no reason to
+        // walk the players, which is why this is the first test.
+        m_recordingDriveContended = false;
+        return;
+    }
+    const int index = rowIndexForMountPoint(m_recordingMountPoint);
+    if (index < 0) {
+        // The drive we are recording to is not in the enumeration any more: it
+        // was pulled. The vanished-mount diff in refresh() owns that, and it
+        // stops the recording; there is nothing useful to say here.
+        return;
+    }
+    const QString playingMount = playingMountOnUsbDeviceOf(index);
+    if (playingMount.isEmpty()) {
+        // Cleared: whatever was playing off the drive has stopped or been
+        // ejected, so the next track that starts off it is warned about again.
+        m_recordingDriveContended = false;
+        return;
+    }
+    if (m_recordingDriveContended) {
+        // Already said once for this track. Repeating it on every poll tick
+        // would bury whatever else the strip has to show for as long as the
+        // track runs.
+        return;
+    }
+    m_recordingDriveContended = true;
+
+    // A warning, not a stop: the recording is the DJ's, the track is playing to
+    // the room, and taking either away mid-set is worse than the contention.
+    // They are the only one who can decide which to give up.
+    const QString recordingName = QDir(m_recordingMountPoint).dirName();
+    notify(playingMount == m_recordingMountPoint
+                    ? tr("Playing from %1 while recording to it — audio may drop")
+                              .arg(recordingName)
+                    : tr("Playing from %1 while recording to %2 on the same "
+                         "drive — audio may drop")
+                              .arg(QDir(playingMount).dirName(), recordingName),
+            Notifications::Severity::Warning);
+}
+
+QString SystemSettings::playingMountOnUsbDeviceOf(int index) const {
+    const QStringList locations = playingTrackLocations(allPlayers());
+    if (locations.isEmpty()) {
+        // Nothing is playing anywhere: skip resolving the drive's siblings,
+        // which reads the USB topology out of sysfs per mount.
+        return QString();
+    }
+    return mountPlayingFrom(locations, mountsOnSameUsbDevice(index));
+}
+
 void SystemSettings::startRecordingToRow(int index) {
     if (!m_pRecordingManager) {
         return;
@@ -739,6 +992,26 @@ void SystemSettings::startRecordingToRow(int index) {
     }
 
     const QString mountPoint = m_usbMounts.at(index).mountPoint;
+
+    // Never record onto the stick a deck is reading from. The recorder writes
+    // the main output continuously while the reader worker is streaming the
+    // track off the same device and the same USB bus, and it is the playing
+    // track that loses that race: the read stalls, the cache misses, and the
+    // deck goes silent with the transport still moving. Refuse instead, before
+    // the mkpath below writes anything to the drive.
+    const QString playingMount = playingMountOnUsbDeviceOf(index);
+    if (!playingMount.isEmpty()) {
+        const QString driveName = QDir(mountPoint).dirName();
+        notify(playingMount == mountPoint
+                        ? tr("Can't record to %1 while a track is playing from it")
+                                  .arg(driveName)
+                        : tr("Can't record to %1 while a track is playing from "
+                             "%2 on the same drive")
+                                  .arg(driveName, QDir(playingMount).dirName()),
+                Notifications::Severity::Warning);
+        return;
+    }
+
     QDir drive(mountPoint);
     if (!drive.exists(kRecordingsSubdir) && !drive.mkpath(kRecordingsSubdir)) {
         notify(tr("Cannot write to %1").arg(drive.dirName()),
@@ -803,6 +1076,7 @@ void SystemSettings::releaseRecordingTarget() {
     m_recordingStartWatchdog.stop();
     m_recordingMountPoint.clear();
     m_recordingStarted = false;
+    m_recordingDriveContended = false;
     if (m_savedRecordingDir) {
         m_pConfig->set(ConfigKey(RECORDING_PREF_KEY, "Directory"),
                 ConfigValue(*m_savedRecordingDir));

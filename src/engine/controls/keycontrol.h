@@ -40,12 +40,15 @@ class KeyControl : public EngineControl {
     void slotRateChanged();
     void slotSyncKey(double);
     void slotResetKey(double);
+    void slotPitchUp1(double);
+    void slotPitchDown1(double);
     void slotPitchUp2(double);
     void slotPitchDown2(double);
 
   private:
     void setEngineKey(double key, double key_distance);
     bool syncKey(EngineBuffer* pOtherEngineBuffer);
+    void nudgePitch(double semitones);
     void updateKeyCOs(double fileKeyNumeric, double pitchOctaves);
     void updatePitch();
     void updatePitchAdjust();
@@ -62,6 +65,8 @@ class KeyControl : public EngineControl {
     std::unique_ptr<ControlPotmeter> m_pPitchAdjust;
     std::unique_ptr<ControlPushButton> m_pButtonSyncKey;
     std::unique_ptr<ControlPushButton> m_pButtonResetKey;
+    std::unique_ptr<ControlPushButton> m_pButtonPitchUp1;
+    std::unique_ptr<ControlPushButton> m_pButtonPitchDown1;
     std::unique_ptr<ControlPushButton> m_pButtonPitchUp2;
     std::unique_ptr<ControlPushButton> m_pButtonPitchDown2;
     std::unique_ptr<ControlPushButton> m_keylockMode;

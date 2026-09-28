@@ -6,6 +6,7 @@
 #include <QStyleOption>
 #include <QStylePainter>
 #include <QtDebug>
+#include <algorithm>
 
 #include "control/controlbehavior.h"
 #include "control/controlobject.h"
@@ -14,6 +15,22 @@
 #include "util/debug.h"
 #include "widget/controlwidgetconnection.h"
 #include "widget/wpixmapstore.h"
+
+namespace {
+// Hold-to-repeat defaults, in milliseconds. The delay is long enough that a
+// normal tap never repeats. The interval starts at a comfortable key-repeat
+// rate and accelerates to the floor while the button is held: a fixed rate is
+// no good for controls this fine-grained, since 80 ms between 10 ms grid steps
+// is 125 ms of grid per second of holding, which reads as nothing moving. The
+// floor is deliberately not lower than this — each tick is a control write
+// that can re-render a waveform, and this runs on a Pi.
+constexpr int kDefaultRepeatDelayMillis = 350;
+constexpr int kDefaultRepeatIntervalMillis = 80;
+constexpr int kDefaultRepeatMinIntervalMillis = 25;
+// Applied per tick, so the interval reaches the floor after roughly a second
+// of holding.
+constexpr int kRepeatAccelerationPercent = 92;
+} // namespace
 
 WPushButton::WPushButton(QWidget* pParent)
         : WWidget(pParent),
@@ -231,7 +248,88 @@ void WPushButton::setup(const QDomNode& node, const SkinContext& context) {
         }
     }
 
+    // Hold-to-repeat began as the AutoRepeat push button in PiFlex
+    // <https://github.com/xsploit/PiFlex> by Tyler "subsect", and was reworked
+    // here; see LICENSE.
+    //
+    // <Repeat>true</Repeat> makes a held button keep firing its control.
+    // Controls whose single press is a deliberately fine step are unusable
+    // without it: beats_translate_earlier moves the grid 10 ms and
+    // beats_adjust_faster changes it by 0.01 BPM, so a grid edit is dozens of
+    // presses. Optional <RepeatDelay> / <RepeatInterval> override the timing.
+    if (context.selectBool(node, "Repeat", false)) {
+        if (m_leftButtonMode == ControlPushButton::PUSH || m_iNoStates == 1) {
+            m_repeatDelayMs = kDefaultRepeatDelayMillis;
+            m_repeatIntervalMs = kDefaultRepeatIntervalMillis;
+            m_repeatMinIntervalMs = kDefaultRepeatMinIntervalMillis;
+            context.hasNodeSelectInt(node, "RepeatDelay", &m_repeatDelayMs);
+            context.hasNodeSelectInt(node, "RepeatInterval", &m_repeatIntervalMs);
+            context.hasNodeSelectInt(node, "RepeatMinInterval", &m_repeatMinIntervalMs);
+            // A floor above the starting interval would be an acceleration
+            // that slows down; clamp rather than reject, so shortening
+            // RepeatInterval alone stays a valid way to ask for a fixed rate.
+            m_repeatMinIntervalMs = std::min(m_repeatMinIntervalMs, m_repeatIntervalMs);
+            if (m_repeatDelayMs <= 0 || m_repeatIntervalMs <= 0 ||
+                    m_repeatMinIntervalMs <= 0) {
+                SKIN_WARNING(node,
+                        context,
+                        QStringLiteral("WPushButton::setup: RepeatDelay, "
+                                       "RepeatInterval and RepeatMinInterval "
+                                       "must all be positive."));
+                m_repeatDelayMs = 0;
+                m_repeatIntervalMs = 0;
+            } else {
+                connect(&m_repeatTimer,
+                        &QTimer::timeout,
+                        this,
+                        &WPushButton::slotRepeat);
+            }
+        } else {
+            // Re-firing a toggle would only flip it back and forth.
+            SKIN_WARNING(node,
+                    context,
+                    QStringLiteral("WPushButton::setup: <Repeat> needs a push "
+                                   "button. Consider "
+                                   "<LeftClickIsPushButton>true</"
+                                   "LeftClickIsPushButton>."));
+        }
+    }
+
     setFocusPolicy(Qt::NoFocus);
+}
+
+void WPushButton::startRepeat() {
+    if (m_repeatDelayMs <= 0) {
+        return;
+    }
+    // Every hold starts at the slow end, so the acceleration of the previous
+    // one cannot make this one's first steps coarse.
+    m_repeatCurrentIntervalMs = m_repeatIntervalMs;
+    m_repeatTimer.setSingleShot(true);
+    m_repeatTimer.start(m_repeatDelayMs);
+}
+
+void WPushButton::stopRepeat() {
+    m_repeatTimer.stop();
+}
+
+void WPushButton::slotRepeat() {
+    if (!m_bPressed) {
+        stopRepeat();
+        return;
+    }
+    // A push control only acts on the 0 -> 1 edge, so the release has to be
+    // emitted before the next press or the control never changes value.
+    setControlParameterLeftUp(0.0);
+    setControlParameterLeftDown(1.0);
+
+    // Re-armed after the emit rather than free-running, so a control that is
+    // slow to act throttles the repeat instead of queueing ticks behind it.
+    m_repeatTimer.start(m_repeatCurrentIntervalMs);
+    if (m_repeatCurrentIntervalMs > m_repeatMinIntervalMs) {
+        m_repeatCurrentIntervalMs = std::max(m_repeatMinIntervalMs,
+                (m_repeatCurrentIntervalMs * kRepeatAccelerationPercent) / 100);
+    }
 }
 
 void WPushButton::setStates(int iStates) {
@@ -428,13 +526,18 @@ void WPushButton::mousePressEvent(QMouseEvent * e) {
             }
         }
         setControlParameterLeftDown(emitValue);
+        if (m_leftButtonMode == ControlPushButton::PUSH || m_iNoStates == 1) {
+            startRepeat();
+        }
         restyleAndRepaint();
     }
 }
 
 bool WPushButton::event(QEvent* e) {
-    if (e->type() == QEvent::WindowDeactivate) {
-        // if the window is deactivated while in pressed state
+    if (e->type() == QEvent::WindowDeactivate || e->type() == QEvent::Hide) {
+        // if the window is deactivated, or the button is taken off screen
+        // (switching skin pages), while in pressed state
+        stopRepeat();
         if (m_bPressed) {
             m_bPressed = false;
             restyleAndRepaint();
@@ -468,6 +571,7 @@ void WPushButton::focusOutEvent(QFocusEvent* e) {
         // Since we support multi touch there is no reason to reset
         // the pressed flag if the Primary touch point is moved to an
         // other widget
+        stopRepeat();
         m_bPressed = false;
         restyleAndRepaint();
     }
@@ -477,6 +581,13 @@ void WPushButton::focusOutEvent(QFocusEvent* e) {
 void WPushButton::mouseReleaseEvent(QMouseEvent * e) {
     const bool leftClick = e->button() == Qt::LeftButton;
     const bool rightClick = e->button() == Qt::RightButton;
+
+    if (leftClick) {
+        // Ending the press ends the repeat, whichever of the branches below
+        // handles it. A right release must not, since the two buttons are
+        // independent and only the left one repeats.
+        stopRepeat();
+    }
 
     if (m_pLongPressLatching) {
         m_pLongPressLatching->stop();

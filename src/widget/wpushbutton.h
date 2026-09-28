@@ -65,6 +65,7 @@ class WPushButton : public WWidget {
 
   private slots:
     void updateSlot();
+    void slotRepeat();
 
   protected:
     bool event(QEvent* e) override;
@@ -93,6 +94,12 @@ class WPushButton : public WWidget {
 
     void paintOnDevice(QPaintDevice* pd, int idx);
 
+    // Hold-to-repeat, enabled per-button from the skin with <Repeat>. Push
+    // buttons only: each tick re-emits the press so a held button keeps
+    // firing the control.
+    void startRepeat();
+    void stopRepeat();
+
     // True, if the button is currently pressed
     bool m_bPressed;
     // True, if the button is pointer is above button
@@ -113,6 +120,17 @@ class WPushButton : public WWidget {
     ControlPushButton::ButtonMode m_rightButtonMode;
     QTimer m_clickTimer;
     QVector<int> m_align;
+
+    // Hold-to-repeat timing. A zero delay means the button does not repeat,
+    // which is the default for every button that does not ask for it. The
+    // interval decays from m_repeatIntervalMs toward m_repeatMinIntervalMs
+    // while the button is held, so the same button is both a fine stepper and
+    // a coarse one; equal values give a constant rate.
+    QTimer m_repeatTimer;
+    int m_repeatDelayMs = 0;
+    int m_repeatIntervalMs = 0;
+    int m_repeatMinIntervalMs = 0;
+    int m_repeatCurrentIntervalMs = 0;
 
     // Animates long press latching by storing the off state of the
     // WPushButton in a pixmap and gradually (from left to right)

@@ -3,7 +3,7 @@
   <info>
     <name>DeckShark Eject</name>
     <author>deckshark</author>
-    <description>Receives drive-eject notes from the DeckShark daemon; Mixxx unloads every track on the drive and unmounts it ([BiteDJ],eject_driveN).</description>
+    <description>Talks to the DeckShark eject-button daemon. In: drive-eject notes, on which Mixxx unloads every track on the drive and unmounts it ([BiteDJ],eject_driveN).</description>
     <hidden>true</hidden>
   </info>
   <controller id="DeckShark:eject">
@@ -38,6 +38,47 @@
         <options><Normal/></options>
       </control>
     </controls>
-    <outputs/>
+    <outputs>
+      <output>
+        <group>[BiteDJ]</group>
+        <key>drive1_playing</key>
+        <status>0x90</status>
+        <midino>0x50</midino>
+        <on>0x7F</on>
+        <off>0x00</off>
+        <minimum>0.5</minimum>
+        <maximum>1.0</maximum>
+      </output>
+      <output>
+        <group>[BiteDJ]</group>
+        <key>drive2_playing</key>
+        <status>0x90</status>
+        <midino>0x51</midino>
+        <on>0x7F</on>
+        <off>0x00</off>
+        <minimum>0.5</minimum>
+        <maximum>1.0</maximum>
+      </output>
+      <output>
+        <group>[BiteDJ]</group>
+        <key>drive3_playing</key>
+        <status>0x90</status>
+        <midino>0x52</midino>
+        <on>0x7F</on>
+        <off>0x00</off>
+        <minimum>0.5</minimum>
+        <maximum>1.0</maximum>
+      </output>
+      <output>
+        <group>[BiteDJ]</group>
+        <key>drive4_playing</key>
+        <status>0x90</status>
+        <midino>0x53</midino>
+        <on>0x7F</on>
+        <off>0x00</off>
+        <minimum>0.5</minimum>
+        <maximum>1.0</maximum>
+      </output>
+    </outputs>
   </controller>
 </MixxxControllerPreset>

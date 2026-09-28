@@ -1,33 +1,16 @@
 <!--
-  One parameter row in the BeatFX column. Visibility binds to
-  parameter{N}_loaded so the row collapses when an effect doesn't expose
-  this slot.
+  One Beats-typed parameter row (parameter{N}_units == 1) in the BeatFX
+  parameter list: label over a bucket picker, two rows of three. These come first
+  in the list so the parameter the controller's Beat buttons step is on top.
+  Every other knob parameter is rendered by effect_knob_param_row.xml and
+  button parameters (Quantize, Triplets, ...) by effect_button_param_row.xml.
 
-  Only Beats-typed parameters (parameter{N}_units == 1) render by
-  default; their bucket picker is the whole control surface. Continuous
-  knobs ate too much vertical space at 800x480 and collided with deck
-  select, so non-Beats slots collapse unless opted back in per slot via
-  mixxx.cfg:
+  Bucket values are periods in beats; see effect_param_bucket.xml.
 
-    [Skin]
-    beatfx_show_param3 1
-
-  (persisted CO, defaults to 0 — slot index N is positional within the
-  loaded effect, not tied to a named parameter).
-
-  Bucket mapping: labels read as period in beats (⅛, ¼, ½, 1, 2, 4),
-  and the written value is rate in cycles per beat (1/period). Matches
-  Tremolo's `rate` (the most-user-visible Beats parameter). For
-  period-semantic parameters (Echo delay_time, Phaser lfo_period) the
-  labels read inverted under this mapping — flag if those effects need
-  per-parameter inverse pairings.
-
-  Skin connections only bind one CO per visibility binding and have no
-  AND/OR transform, so the composite visibility is built out of nested
-  WidgetGroups.
+  The row collapses unless the loaded effect's slot N is Beats-typed.
 
   See CLAUDE.md "Mixxx fork patches" for the fork-side surface that
-  exposes parameter{N}_units.
+  exposes parameter{N}_units and parameter{N}_beat_period.
 -->
 <Template>
   <SetVariable name="EffectGroup">[EffectRack<Variable name="rack"/>_EffectUnit<Variable name="unit"/>_Effect<Variable name="effect"/>]</SetVariable>
@@ -37,18 +20,16 @@
     <SizePolicy>me,min</SizePolicy>
     <Children>
 
-      <!--
-        Branch A (Beats-typed parameters): label + bucket picker, two
-        rows of three buttons. Always visible when loaded.
-      -->
+      <!-- Label above the buckets: side by side, the six buckets don't fit
+           the narrow panel next to the scroll bar. -->
       <WidgetGroup>
-        <Layout>horizontal</Layout>
+        <Layout>vertical</Layout>
         <SizePolicy>me,min</SizePolicy>
         <Children>
 
           <EffectParameterName>
             <ObjectName>BeatFX_ParamLabel</ObjectName>
-            <Size>0me,0me</Size>
+            <Size>0me,24f</Size>
             <Alignment>left</Alignment>
             <Elide>right</Elide>
             <EffectRack><Variable name="rack"/></EffectRack>
@@ -70,19 +51,19 @@
                     <SetVariable name="EffectGroup"><Variable name="EffectGroup"/></SetVariable>
                     <SetVariable name="param"><Variable name="param"/></SetVariable>
                     <SetVariable name="Label">⅛</SetVariable>
-                    <SetVariable name="Value">8</SetVariable>
+                    <SetVariable name="Value">0.125</SetVariable>
                   </Template>
                   <Template src="skin:templates/effect_param_bucket.xml">
                     <SetVariable name="EffectGroup"><Variable name="EffectGroup"/></SetVariable>
                     <SetVariable name="param"><Variable name="param"/></SetVariable>
                     <SetVariable name="Label">¼</SetVariable>
-                    <SetVariable name="Value">4</SetVariable>
+                    <SetVariable name="Value">0.25</SetVariable>
                   </Template>
                   <Template src="skin:templates/effect_param_bucket.xml">
                     <SetVariable name="EffectGroup"><Variable name="EffectGroup"/></SetVariable>
                     <SetVariable name="param"><Variable name="param"/></SetVariable>
                     <SetVariable name="Label">½</SetVariable>
-                    <SetVariable name="Value">2</SetVariable>
+                    <SetVariable name="Value">0.5</SetVariable>
                   </Template>
                 </Children>
               </WidgetGroup>
@@ -100,13 +81,13 @@
                     <SetVariable name="EffectGroup"><Variable name="EffectGroup"/></SetVariable>
                     <SetVariable name="param"><Variable name="param"/></SetVariable>
                     <SetVariable name="Label">2</SetVariable>
-                    <SetVariable name="Value">0.5</SetVariable>
+                    <SetVariable name="Value">2</SetVariable>
                   </Template>
                   <Template src="skin:templates/effect_param_bucket.xml">
                     <SetVariable name="EffectGroup"><Variable name="EffectGroup"/></SetVariable>
                     <SetVariable name="param"><Variable name="param"/></SetVariable>
                     <SetVariable name="Label">4</SetVariable>
-                    <SetVariable name="Value">0.25</SetVariable>
+                    <SetVariable name="Value">4</SetVariable>
                   </Template>
                 </Children>
               </WidgetGroup>
@@ -114,76 +95,19 @@
           </WidgetGroup>
 
         </Children>
-        <Connection>
-          <ConfigKey><Variable name="EffectGroup"/>,parameter<Variable name="param"/>_units</ConfigKey>
-          <BindProperty>visible</BindProperty>
-          <Transform>
-            <IsEqual>1</IsEqual>
-          </Transform>
-        </Connection>
-      </WidgetGroup>
-
-      <!--
-        Branch B (non-Beats parameters): label + continuous knob.
-        Hidden unless [Skin],beatfx_show_param{N} is set in mixxx.cfg.
-      -->
-      <WidgetGroup>
-        <Layout>horizontal</Layout>
-        <SizePolicy>me,min</SizePolicy>
-        <Children>
-          <WidgetGroup>
-            <Layout>horizontal</Layout>
-            <SizePolicy>me,min</SizePolicy>
-            <Children>
-
-              <EffectParameterName>
-                <ObjectName>BeatFX_ParamLabel</ObjectName>
-                <Size>0me,0me</Size>
-                <Alignment>left</Alignment>
-                <Elide>right</Elide>
-                <EffectRack><Variable name="rack"/></EffectRack>
-                <EffectUnit><Variable name="unit"/></EffectUnit>
-                <Effect><Variable name="effect"/></Effect>
-                <EffectParameter><Variable name="param"/></EffectParameter>
-              </EffectParameterName>
-
-              <EffectParameterKnobComposed>
-                <ObjectName>BeatFX_ParamKnob</ObjectName>
-                <Size>40f,40f</Size>
-                <Knob scalemode="STRETCH_ASPECT">icons/knob.svg</Knob>
-                <MinAngle>-230</MinAngle>
-                <MaxAngle>50</MaxAngle>
-                <EffectRack><Variable name="rack"/></EffectRack>
-                <EffectUnit><Variable name="unit"/></EffectUnit>
-                <Effect><Variable name="effect"/></Effect>
-                <EffectParameter><Variable name="param"/></EffectParameter>
-                <Connection>
-                  <ConfigKey><Variable name="EffectGroup"/>,parameter<Variable name="param"/></ConfigKey>
-                </Connection>
-              </EffectParameterKnobComposed>
-
-            </Children>
-            <Connection>
-              <ConfigKey><Variable name="EffectGroup"/>,parameter<Variable name="param"/>_units</ConfigKey>
-              <BindProperty>visible</BindProperty>
-              <Transform>
-                <IsEqual>1</IsEqual>
-                <Not/>
-              </Transform>
-            </Connection>
-          </WidgetGroup>
-        </Children>
-        <Connection>
-          <ConfigKey persist="true">[Skin],beatfx_show_param<Variable name="param"/></ConfigKey>
-          <BindProperty>visible</BindProperty>
-        </Connection>
       </WidgetGroup>
 
     </Children>
 
+    <!-- An unloaded slot reports Unknown units, so this also hides it. One
+         binding on the outermost group: a hidden inner group would leave
+         an empty, padded row behind. -->
     <Connection>
-      <ConfigKey><Variable name="EffectGroup"/>,parameter<Variable name="param"/>_loaded</ConfigKey>
+      <ConfigKey><Variable name="EffectGroup"/>,parameter<Variable name="param"/>_units</ConfigKey>
       <BindProperty>visible</BindProperty>
+      <Transform>
+        <IsEqual>1</IsEqual>
+      </Transform>
     </Connection>
   </WidgetGroup>
 </Template>

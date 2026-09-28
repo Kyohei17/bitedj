@@ -18,6 +18,8 @@ class KeyControlTest : public BaseSignalPathTest {
         m_pFileKey = std::make_unique<ControlProxy>(m_sGroup1, "file_key");
         m_pKeyShifted = std::make_unique<ControlProxy>(m_sGroup1, "key_shifted");
         m_pPitch = std::make_unique<ControlProxy>(m_sGroup1, "pitch");
+        m_pPitchUp1 = std::make_unique<ControlProxy>(m_sGroup1, "pitch_up_1");
+        m_pPitchDown1 = std::make_unique<ControlProxy>(m_sGroup1, "pitch_down_1");
         m_pPitchUp2 = std::make_unique<ControlProxy>(m_sGroup1, "pitch_up_2");
         m_pPitchDown2 = std::make_unique<ControlProxy>(m_sGroup1, "pitch_down_2");
         m_pResetKey = std::make_unique<ControlProxy>(m_sGroup1, "reset_key");
@@ -26,6 +28,8 @@ class KeyControlTest : public BaseSignalPathTest {
     std::unique_ptr<ControlProxy> m_pFileKey;
     std::unique_ptr<ControlProxy> m_pKeyShifted;
     std::unique_ptr<ControlProxy> m_pPitch;
+    std::unique_ptr<ControlProxy> m_pPitchUp1;
+    std::unique_ptr<ControlProxy> m_pPitchDown1;
     std::unique_ptr<ControlProxy> m_pPitchUp2;
     std::unique_ptr<ControlProxy> m_pPitchDown2;
     std::unique_ptr<ControlProxy> m_pResetKey;
@@ -56,4 +60,23 @@ TEST_F(KeyControlTest, KeyShiftedStaysClearWithoutAFileKey) {
     m_pFileKey->set(KeyUtils::keyToNumericValue(mixxx::track::io::key::INVALID));
     m_pPitchUp2->set(1.0);
     EXPECT_DOUBLE_EQ(0.0, m_pKeyShifted->get());
+}
+
+TEST_F(KeyControlTest, SemitoneNudgesAreExactAndClamped) {
+    m_pPitchUp1->set(1.0);
+    EXPECT_DOUBLE_EQ(1.0, m_pPitch->get());
+    m_pPitchUp2->set(1.0);
+    EXPECT_DOUBLE_EQ(3.0, m_pPitch->get());
+    m_pPitchDown1->set(1.0);
+    EXPECT_DOUBLE_EQ(2.0, m_pPitch->get());
+
+    // Nudges stop at the pitch knob's +/-6 range.
+    for (int i = 0; i < 10; ++i) {
+        m_pPitchUp1->set(1.0);
+    }
+    EXPECT_DOUBLE_EQ(6.0, m_pPitch->get());
+    for (int i = 0; i < 20; ++i) {
+        m_pPitchDown1->set(1.0);
+    }
+    EXPECT_DOUBLE_EQ(-6.0, m_pPitch->get());
 }

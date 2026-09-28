@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "preferences/waveformsettings.h"
+#include "track/keyfactory.h"
 
 namespace {
 
@@ -200,6 +201,34 @@ bool FsAnalysisCache::openConnection(QSqlDatabase& db, bool writable, QSqlError*
             }
             return false;
         }
+        // Beat grid, keyed by relpath. Compressed like the waveform blobs and
+        // covered by the same corrupt-file recovery path in databaseForTrack().
+        // No `type` column: exactly one beats row per track. `version` is Mixxx's
+        // "BeatMap-1.0" etc, needed to reconstruct via mixxx::Beats::fromByteArray.
+        if (!query.exec(QStringLiteral(
+                    "CREATE TABLE IF NOT EXISTS beats_cache ("
+                    "relpath TEXT NOT NULL PRIMARY KEY, "
+                    "version TEXT, sub_version TEXT, "
+                    "data_checksum INTEGER, data BLOB)"))) {
+            if (pError) {
+                *pError = query.lastError();
+            }
+            return false;
+        }
+        // Detected keys, same shape. Keys::toByteArray() serializes the whole
+        // key-detection result, but the global key text is also stored plainly
+        // so a stick can be inspected without a Keys deserializer.
+        if (!query.exec(QStringLiteral(
+                    "CREATE TABLE IF NOT EXISTS keys_cache ("
+                    "relpath TEXT NOT NULL PRIMARY KEY, "
+                    "version TEXT, sub_version TEXT, "
+                    "data_checksum INTEGER, data BLOB, "
+                    "global_key_id INTEGER, global_key_text TEXT)"))) {
+            if (pError) {
+                *pError = query.lastError();
+            }
+            return false;
+        }
     }
     return true;
 }
@@ -321,6 +350,171 @@ bool FsAnalysisCache::saveTrackAnalyses(
     }
 
     return ok && summaryOk;
+}
+
+bool FsAnalysisCache::saveTrackBeats(
+        const QString& trackLocation,
+        const mixxx::BeatsPointer& pBeats) {
+    // Hold the handles lock across the whole operation so an eject-driven
+    // releaseFilesystem() on another thread can't close the connection mid-write.
+    QMutexLocker locker(&m_handlesMutex);
+    QString relPath;
+    bool writable = false;
+    QSqlDatabase db = databaseForTrack(trackLocation, &relPath, &writable);
+    if (!db.isValid() || !db.isOpen() || !writable) {
+        return false;
+    }
+
+    // A null pBeats means the track has no beat grid — delete any stored entry
+    // so a stale one from an older analyzer run doesn't come back on next load.
+    if (!pBeats) {
+        QSqlQuery query(db);
+        query.prepare(QStringLiteral(
+                "DELETE FROM beats_cache WHERE relpath = :relpath"));
+        query.bindValue(QStringLiteral(":relpath"), relPath);
+        if (!query.exec()) {
+            qWarning() << "FsAnalysisCache: cannot clear beats for" << relPath
+                       << query.lastError().text();
+            return false;
+        }
+        return true;
+    }
+
+    const QByteArray compressedData = qCompress(pBeats->toByteArray(), kCompressionLevel);
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+            "INSERT OR REPLACE INTO beats_cache "
+            "(relpath, version, sub_version, data_checksum, data) "
+            "VALUES (:relpath, :version, :sub_version, :data_checksum, :data)"));
+    query.bindValue(QStringLiteral(":relpath"), relPath);
+    query.bindValue(QStringLiteral(":version"), pBeats->getVersion());
+    query.bindValue(QStringLiteral(":sub_version"), pBeats->getSubVersion());
+    query.bindValue(QStringLiteral(":data_checksum"), checksumOf(compressedData));
+    query.bindValue(QStringLiteral(":data"), compressedData);
+    if (!query.exec()) {
+        qWarning() << "FsAnalysisCache: cannot save beats for" << relPath
+                   << query.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+mixxx::BeatsPointer FsAnalysisCache::getTrackBeats(
+        const QString& trackLocation,
+        mixxx::audio::SampleRate sampleRate) {
+    // Same locking as the write path — releaseFilesystem() is the concurrent
+    // caller we're serializing against.
+    QMutexLocker locker(&m_handlesMutex);
+    QString relPath;
+    QSqlDatabase db = databaseForTrack(trackLocation, &relPath);
+    if (!db.isValid() || !db.isOpen()) {
+        return nullptr;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+            "SELECT version, sub_version, data_checksum, data "
+            "FROM beats_cache WHERE relpath = :relpath"));
+    query.bindValue(QStringLiteral(":relpath"), relPath);
+    if (!query.exec() || !query.next()) {
+        return nullptr;
+    }
+
+    const QByteArray compressedData = query.value(3).toByteArray();
+    const int storedChecksum = query.value(2).toInt();
+    if (checksumOf(compressedData) != storedChecksum) {
+        qWarning() << "FsAnalysisCache: corrupt beats entry for" << relPath;
+        return nullptr;
+    }
+    const QString version = query.value(0).toString();
+    if (version.isEmpty()) {
+        return nullptr;
+    }
+    QByteArray beatsBlob = qUncompress(compressedData);
+    return mixxx::Beats::fromByteArray(
+            sampleRate, version, query.value(1).toString(), beatsBlob);
+}
+
+bool FsAnalysisCache::saveTrackKeys(
+        const QString& trackLocation,
+        const Keys& keys) {
+    QMutexLocker locker(&m_handlesMutex);
+    QString relPath;
+    bool writable = false;
+    QSqlDatabase db = databaseForTrack(trackLocation, &relPath, &writable);
+    if (!db.isValid() || !db.isOpen() || !writable) {
+        return false;
+    }
+
+    // An empty version means no serializable key detection: clear the entry so
+    // an older stored one doesn't shadow a re-run that removed keys.
+    if (keys.getVersion().isEmpty()) {
+        QSqlQuery query(db);
+        query.prepare(QStringLiteral(
+                "DELETE FROM keys_cache WHERE relpath = :relpath"));
+        query.bindValue(QStringLiteral(":relpath"), relPath);
+        if (!query.exec()) {
+            qWarning() << "FsAnalysisCache: cannot clear keys for" << relPath
+                       << query.lastError().text();
+            return false;
+        }
+        return true;
+    }
+
+    const QByteArray compressedData = qCompress(keys.toByteArray(), kCompressionLevel);
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+            "INSERT OR REPLACE INTO keys_cache "
+            "(relpath, version, sub_version, data_checksum, data, "
+            "global_key_id, global_key_text) "
+            "VALUES (:relpath, :version, :sub_version, :data_checksum, :data, "
+            ":global_key_id, :global_key_text)"));
+    query.bindValue(QStringLiteral(":relpath"), relPath);
+    query.bindValue(QStringLiteral(":version"), keys.getVersion());
+    query.bindValue(QStringLiteral(":sub_version"), keys.getSubVersion());
+    query.bindValue(QStringLiteral(":data_checksum"), checksumOf(compressedData));
+    query.bindValue(QStringLiteral(":data"), compressedData);
+    query.bindValue(QStringLiteral(":global_key_id"),
+            static_cast<int>(keys.getGlobalKey()));
+    query.bindValue(QStringLiteral(":global_key_text"), keys.getGlobalKeyText());
+    if (!query.exec()) {
+        qWarning() << "FsAnalysisCache: cannot save keys for" << relPath
+                   << query.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+std::optional<Keys> FsAnalysisCache::getTrackKeys(const QString& trackLocation) {
+    QMutexLocker locker(&m_handlesMutex);
+    QString relPath;
+    QSqlDatabase db = databaseForTrack(trackLocation, &relPath);
+    if (!db.isValid() || !db.isOpen()) {
+        return std::nullopt;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+            "SELECT version, sub_version, data_checksum, data "
+            "FROM keys_cache WHERE relpath = :relpath"));
+    query.bindValue(QStringLiteral(":relpath"), relPath);
+    if (!query.exec() || !query.next()) {
+        return std::nullopt;
+    }
+
+    const QByteArray compressedData = query.value(3).toByteArray();
+    const int storedChecksum = query.value(2).toInt();
+    if (checksumOf(compressedData) != storedChecksum) {
+        qWarning() << "FsAnalysisCache: corrupt keys entry for" << relPath;
+        return std::nullopt;
+    }
+    const QString version = query.value(0).toString();
+    if (version.isEmpty()) {
+        return std::nullopt;
+    }
+    QByteArray keysBlob = qUncompress(compressedData);
+    return KeyFactory::loadKeysFromByteArray(
+            version, query.value(1).toString(), &keysBlob);
 }
 
 void FsAnalysisCache::releaseFilesystem(const QString& mountPoint) {

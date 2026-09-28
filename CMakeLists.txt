@@ -791,6 +791,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/skin/legacy/colorschemeparser.cpp
   src/skin/legacy/imgcolor.cpp
   src/skin/legacy/imginvert.cpp
+  src/skin/characterpriority.cpp
   src/skin/highcontrast.cpp
   src/skin/legacy/imgloader.cpp
   src/skin/legacy/launchimage.cpp
@@ -969,6 +970,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
   src/widget/hexspinbox.cpp
   src/widget/paintable.cpp
   src/widget/touchscrollfilter.cpp
+  src/widget/contentdragscroller.cpp
   src/widget/wanalysislibrarytableview.cpp
   src/widget/wbasewidget.cpp
   src/widget/wbattery.cpp
@@ -1541,6 +1543,7 @@ if(BUILD_TESTING)
     src/test/colormapperjsproxy_test.cpp
     src/test/colorpalette_test.cpp
     src/test/configobject_test.cpp
+    src/test/contentdragscroller_test.cpp
     src/test/controller_mapping_validation_test.cpp
     src/test/controller_mapping_settings_test.cpp
     src/test/controllers/controller_columnid_regression_test.cpp
@@ -1559,9 +1562,11 @@ if(BUILD_TESTING)
     src/test/dbidtest.cpp
     src/test/directorydaotest.cpp
     src/test/duration_test.cpp
+    src/test/driveplaying_test.cpp
     src/test/durationutiltest.cpp
     #TODO: write useful tests for refactored effects system
     #src/test/effectchainslottest.cpp
+    src/test/effectbeatperiod_test.cpp
     src/test/enginebufferscalelineartest.cpp
     src/test/enginebuffertest.cpp
     src/test/enginefilterbiquadtest.cpp
@@ -1581,9 +1586,11 @@ if(BUILD_TESTING)
     src/test/fssamplerbankstore_test.cpp
     src/test/samplerdrive_test.cpp
     src/test/globaltrackcache_test.cpp
+    src/test/characterpriority_test.cpp
     src/test/highcontrast_test.cpp
     src/test/hotcuecontrol_test.cpp
     src/test/imageutils_test.cpp
+    src/test/audiosourceshortread_test.cpp
     src/test/indexrange_test.cpp
     src/test/itunesxmlimportertest.cpp
     src/test/keycontrol_test.cpp
@@ -2761,6 +2768,13 @@ set(CPACK_DEBIAN_PACKAGE_REPLACES "mixxx-data")
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "")
 list(APPEND CPACK_DEBIAN_PACKAGE_DEPENDS "fonts-open-sans")
 list(APPEND CPACK_DEBIAN_PACKAGE_DEPENDS "fonts-ubuntu")
+# Bite DJ: CJK coverage. A Depends rather than a Recommends — the appliance
+# image is minimal and has no other font with Han, Kana or Hangul in it, so
+# without this every Japanese, Chinese or Korean track title on a DJ's stick is
+# a row of tofu boxes. One package carries all five regional cuts
+# (JP/SC/TC/HK/KR) as separate families, which is what Settings -> Library ->
+# CHARS picks between; see src/skin/characterpriority.h.
+list(APPEND CPACK_DEBIAN_PACKAGE_DEPENDS "fonts-noto-cjk")
 if(QT6)
   list(APPEND CPACK_DEBIAN_PACKAGE_DEPENDS "libqt6sql6-sqlite")
   list(APPEND CPACK_DEBIAN_PACKAGE_DEPENDS "qt6-qpa-plugins")

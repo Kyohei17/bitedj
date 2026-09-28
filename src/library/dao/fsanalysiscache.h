@@ -5,14 +5,17 @@
 #include <QSet>
 #include <QSqlDatabase>
 #include <QString>
+#include <optional>
 
 #include "library/dao/analysisdao.h"
 #include "preferences/usersettings.h"
+#include "track/beats.h"
+#include "track/keys.h"
 #include "waveform/waveform.h"
 
 class QSqlError;
 
-/// Portable, per-filesystem waveform analysis cache.
+/// Portable, per-filesystem analysis cache: waveforms, beat grids and detected keys.
 ///
 /// Unlike AnalysisDao, which stores waveform blobs in the home settings dir keyed
 /// by the global autoincrement analysisId of the home mixxxdb.sqlite, this cache
@@ -22,8 +25,8 @@ class QSqlError;
 /// is reusable on any Bite DJ unit without re-analysis.
 ///
 /// Enabled via the `[Library]/AnalysisCacheOnTrackFs` config key (default true).
-/// When the track's filesystem is read-only or otherwise not writable, saving is
-/// skipped (logged), matching the "always target the track's own FS" behaviour.
+/// When on, the home `library` table stores empty blobs for the `beats` and `keys`
+/// columns and the real data lives here.
 ///
 /// Each instance opens its own QSqlDatabase connections and is therefore bound to
 /// the thread that created it, mirroring AnalysisDao's per-thread usage.
@@ -56,6 +59,35 @@ class FsAnalysisCache {
             const QString& trackLocation,
             ConstWaveformPointer pWaveform,
             ConstWaveformPointer pWaveSummary);
+
+    /// Persist the beat grid for the track at `trackLocation` to its filesystem's
+    /// cache. A null `pBeats` clears any stored entry. Returns false and logs on
+    /// a hard failure; a read-only filesystem is silent (expected on locked sticks).
+    bool saveTrackBeats(
+            const QString& trackLocation,
+            const mixxx::BeatsPointer& pBeats);
+
+    /// Load the cached beat grid for the track at `trackLocation`. Returns a null
+    /// pointer on a cache miss, or if the filesystem or the entry is unavailable.
+    /// The caller supplies `sampleRate` because the on-disk blob is sample-rate
+    /// agnostic and the constructed BeatsPointer needs it (matching the mixxxdb
+    /// load path in TrackDAO::setTrackBeats).
+    mixxx::BeatsPointer getTrackBeats(
+            const QString& trackLocation,
+            mixxx::audio::SampleRate sampleRate);
+
+    /// Persist the detected keys for the track at `trackLocation` to its
+    /// filesystem's cache. An empty `keys.getVersion()` clears any stored entry.
+    /// Returns false and logs on a hard failure; a read-only filesystem is silent.
+    bool saveTrackKeys(
+            const QString& trackLocation,
+            const Keys& keys);
+
+    /// Load the cached keys for the track at `trackLocation`. Returns `nullopt`
+    /// on a cache miss or when the filesystem is unavailable — a default `Keys`
+    /// is meaningful (empty key-map) so it has to be distinguishable from "no
+    /// entry", or a valid empty saved result would be shadowed by a hit here.
+    std::optional<Keys> getTrackKeys(const QString& trackLocation);
 
     /// Close every open cache connection (across all FsAnalysisCache instances on
     /// any thread) that lives on the filesystem mounted at `mountPoint`, freeing
